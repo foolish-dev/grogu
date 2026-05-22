@@ -12,7 +12,9 @@ desktop in one shot:
 | **[kitty](https://sw.kovidgoyal.net/kitty/)** | writes `~/.config/kitty/grogu.conf`. Activate by adding `include grogu.conf` to `kitty.conf` once; reload with `kill -SIGUSR1 $(pgrep kitty)` or kitty's default `Ctrl+Shift+F5`. |
 | **[ghostty](https://ghostty.org)** | writes `~/.config/ghostty/themes/grogu`. Activate by adding `theme = grogu` to `~/.config/ghostty/config`; ghostty live-reloads on save. |
 
-Three themes ship: `tokyo-night`, `catppuccin`, `dracula`.
+Three themes ship: `tokyo-night`, `catppuccin`, `dracula`. Or extract
+a palette directly from the current wallpaper (see "v2: wallpaper
+extraction" below).
 
 ```sh
 cargo install --path .
@@ -23,7 +25,60 @@ grogu apply                      # defaults to telia's stored theme pref
 grogu apply --theme catppuccin
 grogu apply --no-vim --dry-run   # see what would change without touching files
 grogu apply --no-kitty --no-ghostty  # skip the terminals
+
+# v2: derive the whole palette from the current wallpaper
+grogu apply --extract                              # reads Noctalia's wallpaper cache
+grogu apply --extract /path/to/wallpaper.jpg       # explicit path
+grogu extract /path/to/wallpaper.jpg               # preview without writing
 ```
+
+## v2: wallpaper extraction (pywal-style)
+
+`grogu apply --extract` derives the full 16-colour palette from the
+wallpaper itself instead of reading a predefined theme. The pipeline:
+
+1. Load the image (PNG / JPEG / WebP / BMP via the `image` crate).
+2. Resample to 256×256 for speed.
+3. Convert to CIE Lab and run k-means clustering (k=12, three seeds,
+   keep the lowest within-cluster variance).
+4. Sort centroids by lightness; pin `bg` to the darkest cluster
+   (clamped to L∈[6,16] so terminals stay readable on light wallpapers)
+   and `fg` to the lightest (clamped to L∈[78,92]).
+5. For each accent slot (red, yellow, green, cyan, blue, purple), pick
+   the cluster closest to the canonical hue (25°, 80°, 130°, 180°,
+   230°, 290°), then pull its chroma toward the target hue when the
+   wallpaper doesn't have that colour — otherwise monochromatic
+   wallpapers would collapse half the accents into one shade.
+
+The extracted palette lands in every target:
+
+- **Noctalia** — writes a full Material-Design + ANSI scheme JSON to
+  `~/.config/noctalia/colorschemes/Grogu.json` and sets
+  `colorSchemes.predefinedScheme = "Grogu"`. Noctalia loads user
+  schemes from `colorschemes/` alongside its built-ins.
+- **niri**, **kitty**, **ghostty**, **vim/neovim** — same renderers
+  as predefined mode, just parameterised over the extracted palette.
+- **telia** — telia only ships three themes (`tokyo-night`,
+  `catppuccin`, `dracula`) with no custom-palette support, so grogu
+  picks the *nearest* predefined theme by squared-distance on
+  `bg + purple` in sRGB and writes that name to telia's pref store.
+
+Wallpaper source resolution order:
+
+1. Explicit path: `grogu apply --extract /path/to/img.jpg`
+2. `$GROGU_WALLPAPER` env var (intended for hook invocations)
+3. Noctalia's wallpaper cache at `~/.cache/noctalia/wallpapers.json`
+   — grogu walks the JSON looking for the first string that names an
+   existing file, preferring `dark` keys.
+
+Preview without writing:
+
+```sh
+grogu extract /path/to/img.jpg
+```
+
+prints the extracted palette so you can sanity-check what `apply
+--extract` will do.
 
 ## Hook it to Noctalia's wallpaper rotation
 
@@ -32,8 +87,13 @@ Add a hook that runs after a wallpaper change:
 
 ```
 event: wallpaper.changed
-command: grogu apply
+command: grogu apply --extract
 ```
+
+(Drop `--extract` if you'd rather lock to a predefined theme.)
+If Noctalia's hook system can pass the new wallpaper path as an
+argument, set the command to `grogu apply --extract %{wallpaper}` —
+otherwise grogu reads the path back out of Noctalia's wallpaper cache.
 
 Now every wallpaper rotation re-paints the rest of the desktop. niri
 picks up the new colours automatically (live reload), telia uses the

@@ -29,81 +29,93 @@ use std::path::PathBuf;
 /// Values lifted from the canonical theme definitions (Tokyo Night,
 /// Catppuccin Mocha, Dracula) so the desktop reads identically to a
 /// terminal running the same scheme.
+#[derive(Clone)]
 struct Theme {
-    slug: &'static str,
-    /// Noctalia's bundled scheme name, e.g. "Tokyo-Night".
-    noctalia: &'static str,
-    bg: &'static str,
-    bg_hl: &'static str,
-    fg: &'static str,
+    slug: String,
+    /// Noctalia's bundled scheme name (e.g. "Tokyo-Night") OR "Grogu"
+    /// when `noctalia_custom` is set — then we write a full custom
+    /// scheme JSON to colorschemes/Grogu.json.
+    noctalia: String,
+    /// When true, write our own scheme JSON instead of relying on
+    /// Noctalia's bundled scheme of the same name. Used by v2 extract
+    /// mode where the palette comes from the wallpaper.
+    noctalia_custom: bool,
+    bg: String,
+    bg_hl: String,
+    fg: String,
     /// ANSI color8 / "bright black" / comments — softer than `black`.
-    dim: &'static str,
-    /// ANSI color0 — the darkest neutral in the palette. Distinct from
-    /// `bg` (a bit darker) and from `dim` (a bit darker still).
-    black: &'static str,
+    dim: String,
+    /// ANSI color0 — the darkest neutral. Distinct from `bg` (a bit
+    /// darker) and from `dim` (a bit darker still).
+    black: String,
     /// ANSI color7 — "white" cell, slightly muted vs. `fg`.
-    light_fg: &'static str,
-    red: &'static str,
-    green: &'static str,
-    yellow: &'static str,
-    blue: &'static str,
-    purple: &'static str,
-    cyan: &'static str,
+    light_fg: String,
+    red: String,
+    green: String,
+    yellow: String,
+    blue: String,
+    purple: String,
+    cyan: String,
 }
 
-const THEMES: &[Theme] = &[
-    Theme {
-        slug: "tokyo-night",
-        noctalia: "Tokyo-Night",
-        bg: "#1a1b26",
-        bg_hl: "#283457",
-        fg: "#c0caf5",
-        dim: "#414868",
-        black: "#15161e",
-        light_fg: "#a9b1d6",
-        red: "#f7768e",
-        green: "#9ece6a",
-        yellow: "#e0af68",
-        blue: "#7aa2f7",
-        purple: "#bb9af7",
-        cyan: "#7dcfff",
-    },
-    Theme {
-        slug: "catppuccin",
-        noctalia: "Catppuccin",
-        bg: "#1e1e2e",
-        bg_hl: "#313244",
-        fg: "#cdd6f4",
-        dim: "#6c7086",
-        black: "#45475a",
-        light_fg: "#bac2de",
-        red: "#f38ba8",
-        green: "#a6e3a1",
-        yellow: "#f9e2af",
-        blue: "#89b4fa",
-        purple: "#cba6f7",
-        cyan: "#94e2d5",
-    },
-    Theme {
-        slug: "dracula",
-        noctalia: "Dracula",
-        bg: "#282a36",
-        bg_hl: "#44475a",
-        fg: "#f8f8f2",
-        dim: "#6272a4",
-        black: "#21222c",
-        light_fg: "#f8f8f2",
-        red: "#ff5555",
-        green: "#50fa7b",
-        yellow: "#f1fa8c",
-        blue: "#8be9fd",
-        purple: "#bd93f9",
-        cyan: "#8be9fd",
-    },
-];
+fn predefined_themes() -> Vec<Theme> {
+    vec![
+        Theme {
+            slug: "tokyo-night".into(),
+            noctalia: "Tokyo-Night".into(),
+            noctalia_custom: false,
+            bg: "#1a1b26".into(),
+            bg_hl: "#283457".into(),
+            fg: "#c0caf5".into(),
+            dim: "#414868".into(),
+            black: "#15161e".into(),
+            light_fg: "#a9b1d6".into(),
+            red: "#f7768e".into(),
+            green: "#9ece6a".into(),
+            yellow: "#e0af68".into(),
+            blue: "#7aa2f7".into(),
+            purple: "#bb9af7".into(),
+            cyan: "#7dcfff".into(),
+        },
+        Theme {
+            slug: "catppuccin".into(),
+            noctalia: "Catppuccin".into(),
+            noctalia_custom: false,
+            bg: "#1e1e2e".into(),
+            bg_hl: "#313244".into(),
+            fg: "#cdd6f4".into(),
+            dim: "#6c7086".into(),
+            black: "#45475a".into(),
+            light_fg: "#bac2de".into(),
+            red: "#f38ba8".into(),
+            green: "#a6e3a1".into(),
+            yellow: "#f9e2af".into(),
+            blue: "#89b4fa".into(),
+            purple: "#cba6f7".into(),
+            cyan: "#94e2d5".into(),
+        },
+        Theme {
+            slug: "dracula".into(),
+            noctalia: "Dracula".into(),
+            noctalia_custom: false,
+            bg: "#282a36".into(),
+            bg_hl: "#44475a".into(),
+            fg: "#f8f8f2".into(),
+            dim: "#6272a4".into(),
+            black: "#21222c".into(),
+            light_fg: "#f8f8f2".into(),
+            red: "#ff5555".into(),
+            green: "#50fa7b".into(),
+            yellow: "#f1fa8c".into(),
+            blue: "#8be9fd".into(),
+            purple: "#bd93f9".into(),
+            cyan: "#8be9fd".into(),
+        },
+    ]
+}
 
-fn find_theme(slug: &str) -> Option<&'static Theme> {
-    THEMES.iter().find(|t| t.slug == slug)
+fn find_predefined(slug: &str) -> Option<Theme> {
+    predefined_themes().into_iter().find(|t| t.slug == slug)
 }
 
 #[derive(Parser)]
@@ -125,8 +137,15 @@ enum Cmd {
     Apply {
         /// Theme slug (tokyo-night, catppuccin, dracula).
         /// Default: read from telia's prefs, or fall back to tokyo-night.
+        /// Ignored when --extract is set.
         #[arg(long, short)]
         theme: Option<String>,
+        /// Extract the palette from a wallpaper image instead of using
+        /// a predefined theme. Pass a path explicitly, or omit the value
+        /// to read Noctalia's current wallpaper from
+        /// `~/.cache/noctalia/wallpapers.json`. Honours $GROGU_WALLPAPER.
+        #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "")]
+        extract: Option<String>,
         /// Skip Noctalia.
         #[arg(long)]
         no_noctalia: bool,
@@ -156,15 +175,27 @@ enum Cmd {
     List,
     /// Show every path grogu reads or writes.
     Paths,
+    /// Extract a palette from a wallpaper image and print it (no writes).
+    /// Useful for previewing what `apply --extract` would produce.
+    Extract {
+        /// Wallpaper image path. Defaults to Noctalia's current wallpaper.
+        path: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::List => {
-            for t in THEMES {
+            for t in predefined_themes() {
                 println!("{:<14} -> noctalia:{}", t.slug, t.noctalia);
             }
+        }
+        Cmd::Extract { path } => {
+            let wallpaper = resolve_wallpaper(path.as_deref())?;
+            let theme = extract_palette(&wallpaper)?;
+            println!("wallpaper: {}", wallpaper.display());
+            print_theme(&theme);
         }
         Cmd::Paths => {
             println!("telia sqlite      : {}", telia_db_path()?.display());
@@ -181,6 +212,7 @@ fn main() -> Result<()> {
         }
         Cmd::Apply {
             theme,
+            extract,
             no_noctalia,
             no_niri,
             no_telia,
@@ -190,36 +222,50 @@ fn main() -> Result<()> {
             light,
             dry_run,
         } => {
-            let slug = match theme {
-                Some(t) => t,
-                None => read_telia_theme()?.unwrap_or_else(|| "tokyo-night".to_string()),
+            let theme = match extract {
+                Some(p) => {
+                    let path = if p.is_empty() { None } else { Some(p.as_str()) };
+                    let wallpaper = resolve_wallpaper(path)?;
+                    println!("extracting palette from: {}", wallpaper.display());
+                    extract_palette(&wallpaper)?
+                }
+                None => {
+                    let slug = match theme {
+                        Some(t) => t,
+                        None => read_telia_theme()?.unwrap_or_else(|| "tokyo-night".to_string()),
+                    };
+                    find_predefined(&slug).ok_or_else(|| {
+                        anyhow!(
+                            "unknown theme '{slug}' — known: {}",
+                            predefined_themes()
+                                .iter()
+                                .map(|t| t.slug.clone())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })?
+                }
             };
-            let theme = find_theme(&slug).ok_or_else(|| {
-                anyhow!(
-                    "unknown theme '{slug}' — known: {}",
-                    THEMES.iter().map(|t| t.slug).collect::<Vec<_>>().join(", ")
-                )
-            })?;
             println!("theme: {}", theme.slug);
             if !no_noctalia {
-                println!("  {}", apply_noctalia(theme, !light, dry_run)?);
+                println!("  {}", apply_noctalia(&theme, !light, dry_run)?);
             }
             if !no_niri {
-                println!("  {}", apply_niri(theme, dry_run)?);
+                println!("  {}", apply_niri(&theme, dry_run)?);
             }
             if !no_telia {
-                println!("  {}", apply_telia(theme, dry_run)?);
+                println!("  {}", apply_telia(&theme, dry_run)?);
             }
             if !no_vim {
-                for line in apply_vim(theme, dry_run)? {
+                for line in apply_vim(&theme, dry_run)? {
                     println!("  {line}");
                 }
             }
             if !no_kitty {
-                println!("  {}", apply_kitty(theme, dry_run)?);
+                println!("  {}", apply_kitty(&theme, dry_run)?);
             }
             if !no_ghostty {
-                println!("  {}", apply_ghostty(theme, dry_run)?);
+                println!("  {}", apply_ghostty(&theme, dry_run)?);
             }
             if dry_run {
                 println!("(dry-run — no files written)");
@@ -313,33 +359,74 @@ fn apply_telia(theme: &Theme, dry_run: bool) -> Result<String> {
             path.display()
         ));
     }
+    // telia only ships three predefined themes — no custom-palette
+    // support. For extracted palettes, pick the closest predefined
+    // theme by squared-distance on accent colours.
+    let telia_slug = if theme.noctalia_custom {
+        nearest_predefined(theme)
+    } else {
+        theme.slug.clone()
+    };
     if dry_run {
         return Ok(format!(
-            "telia: would set prefs.theme = '{}' in {}",
-            theme.slug,
+            "telia: would set prefs.theme = '{telia_slug}' in {}",
             path.display()
         ));
     }
     let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
-    // telia creates the prefs table on first launch; just trust it exists.
     conn.execute(
         "INSERT OR REPLACE INTO prefs (key, value) VALUES ('theme', ?1)",
-        params![theme.slug],
+        params![telia_slug],
     )?;
     Ok(format!(
-        "telia: set prefs.theme = '{}' in {}",
-        theme.slug,
+        "telia: set prefs.theme = '{telia_slug}' in {}",
         path.display()
     ))
+}
+
+/// Pick the predefined theme whose `bg` + `purple` come closest to an
+/// extracted palette's, by squared distance in sRGB. Good enough for
+/// telia's three-option set — Tokyo Night, Catppuccin and Dracula are
+/// distinct in accent hue, so the nearest match looks coherent.
+fn nearest_predefined(theme: &Theme) -> String {
+    let target_bg = hex_to_rgb_or_zero(&theme.bg);
+    let target_purple = hex_to_rgb_or_zero(&theme.purple);
+    predefined_themes()
+        .into_iter()
+        .min_by_key(|p| {
+            let p_bg = hex_to_rgb_or_zero(&p.bg);
+            let p_purple = hex_to_rgb_or_zero(&p.purple);
+            sq_dist(p_bg, target_bg) + sq_dist(p_purple, target_purple)
+        })
+        .map(|t| t.slug)
+        .unwrap_or_else(|| "tokyo-night".into())
+}
+
+fn hex_to_rgb_or_zero(hex: &str) -> [i32; 3] {
+    let s = hex.trim_start_matches('#');
+    if s.len() != 6 {
+        return [0, 0, 0];
+    }
+    let parse = |a, b| i32::from_str_radix(&s[a..b], 16).unwrap_or(0);
+    [parse(0, 2), parse(2, 4), parse(4, 6)]
+}
+
+fn sq_dist(a: [i32; 3], b: [i32; 3]) -> i64 {
+    let dr = (a[0] - b[0]) as i64;
+    let dg = (a[1] - b[1]) as i64;
+    let db = (a[2] - b[2]) as i64;
+    dr * dr + dg * dg + db * db
 }
 
 // -------- noctalia: JSON-patch settings.json --------
 
 fn apply_noctalia(theme: &Theme, dark: bool, dry_run: bool) -> Result<String> {
-    let path = noctalia_settings_path()?;
-    let mut doc: Value = if path.exists() {
-        let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        serde_json::from_str(&raw).with_context(|| format!("parse {} as JSON", path.display()))?
+    let settings_path = noctalia_settings_path()?;
+    let mut doc: Value = if settings_path.exists() {
+        let raw = fs::read_to_string(&settings_path)
+            .with_context(|| format!("read {}", settings_path.display()))?;
+        serde_json::from_str(&raw)
+            .with_context(|| format!("parse {} as JSON", settings_path.display()))?
     } else {
         Value::Object(serde_json::Map::new())
     };
@@ -354,29 +441,123 @@ fn apply_noctalia(theme: &Theme, dark: bool, dry_run: bool) -> Result<String> {
     cs.insert("useWallpaperColors".into(), Value::Bool(false));
     cs.insert(
         "predefinedScheme".into(),
-        Value::String(theme.noctalia.into()),
+        Value::String(theme.noctalia.clone()),
     );
     cs.insert("darkMode".into(), Value::Bool(dark));
 
+    // For extracted palettes we also write a full scheme JSON into
+    // Noctalia's user colorschemes/ dir. Noctalia loads bundled + user
+    // schemes by name, so "Grogu" becomes selectable next to the
+    // built-ins.
+    let custom_path = if theme.noctalia_custom {
+        Some(noctalia_custom_scheme_path(&theme.noctalia)?)
+    } else {
+        None
+    };
+
     if dry_run {
-        return Ok(format!(
+        let mut msg = format!(
             "noctalia: would set predefinedScheme={} darkMode={} at {}",
             theme.noctalia,
             dark,
-            path.display()
-        ));
+            settings_path.display()
+        );
+        if let Some(p) = &custom_path {
+            msg.push_str(&format!(
+                "\n  noctalia: would write custom scheme JSON to {}",
+                p.display()
+            ));
+        }
+        return Ok(msg);
     }
-    if let Some(parent) = path.parent() {
+
+    if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let pretty = serde_json::to_string_pretty(&doc)? + "\n";
-    fs::write(&path, pretty).with_context(|| format!("write {}", path.display()))?;
-    Ok(format!(
+    fs::write(&settings_path, pretty)
+        .with_context(|| format!("write {}", settings_path.display()))?;
+
+    let mut msg = format!(
         "noctalia: set predefinedScheme={} darkMode={} in {}",
         theme.noctalia,
         dark,
-        path.display()
-    ))
+        settings_path.display()
+    );
+    if let Some(custom_path) = custom_path {
+        if let Some(parent) = custom_path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        let scheme = noctalia_custom_scheme_json(theme);
+        let pretty_scheme = serde_json::to_string_pretty(&scheme)? + "\n";
+        fs::write(&custom_path, pretty_scheme)
+            .with_context(|| format!("write {}", custom_path.display()))?;
+        msg.push_str(&format!(
+            "\n  noctalia: wrote custom scheme JSON to {}",
+            custom_path.display()
+        ));
+    }
+    Ok(msg)
+}
+
+fn noctalia_custom_scheme_path(name: &str) -> Result<PathBuf> {
+    Ok(xdg_config()?
+        .join("noctalia/colorschemes")
+        .join(format!("{name}.json")))
+}
+
+/// Build a Noctalia-format scheme JSON from a Theme. Only the dark
+/// variant is populated — Noctalia tolerates a partial document and
+/// our extracted palettes don't have a sensible light variant.
+fn noctalia_custom_scheme_json(t: &Theme) -> Value {
+    serde_json::json!({
+        "dark": {
+            "mPrimary": t.blue,
+            "mOnPrimary": t.bg,
+            "mSecondary": t.purple,
+            "mOnSecondary": t.bg,
+            "mTertiary": t.green,
+            "mOnTertiary": t.bg,
+            "mError": t.red,
+            "mOnError": t.bg,
+            "mSurface": t.bg,
+            "mOnSurface": t.fg,
+            "mSurfaceVariant": t.bg_hl,
+            "mOnSurfaceVariant": t.dim,
+            "mOutline": t.dim,
+            "mShadow": t.black,
+            "mHover": t.green,
+            "mOnHover": t.bg,
+            "terminal": {
+                "normal": {
+                    "black": t.black,
+                    "red": t.red,
+                    "green": t.green,
+                    "yellow": t.yellow,
+                    "blue": t.blue,
+                    "magenta": t.purple,
+                    "cyan": t.cyan,
+                    "white": t.light_fg,
+                },
+                "bright": {
+                    "black": t.dim,
+                    "red": t.red,
+                    "green": t.green,
+                    "yellow": t.yellow,
+                    "blue": t.blue,
+                    "magenta": t.purple,
+                    "cyan": t.cyan,
+                    "white": t.fg,
+                },
+                "foreground": t.fg,
+                "background": t.bg,
+                "selectionFg": t.fg,
+                "selectionBg": t.bg_hl,
+                "cursorText": t.bg,
+                "cursor": t.fg,
+            }
+        }
+    })
 }
 
 // -------- niri: include-able KDL snippet --------
@@ -768,4 +949,260 @@ palette = 15={fg}
         purple = theme.purple,
         cyan = theme.cyan,
     )
+}
+
+// -------- v2: palette extraction from a wallpaper image --------
+
+use kmeans_colors::{get_kmeans_hamerly, Kmeans, Sort};
+use palette::{cast::from_component_slice, FromColor, IntoColor, Lab, Srgb};
+use std::path::Path;
+
+/// Decide which wallpaper to extract from. Precedence:
+/// 1. Explicit `--extract PATH` argument
+/// 2. `$GROGU_WALLPAPER` env var (intended for Noctalia hook invocation)
+/// 3. Noctalia's wallpaper cache file
+fn resolve_wallpaper(explicit: Option<&str>) -> Result<PathBuf> {
+    if let Some(p) = explicit {
+        let pb = PathBuf::from(p);
+        if !pb.exists() {
+            return Err(anyhow!("wallpaper does not exist: {}", pb.display()));
+        }
+        return Ok(pb);
+    }
+    if let Some(p) = std::env::var_os("GROGU_WALLPAPER") {
+        let pb = PathBuf::from(p);
+        if pb.exists() {
+            return Ok(pb);
+        }
+    }
+    let cache = noctalia_wallpaper_cache_path()?;
+    if !cache.exists() {
+        return Err(anyhow!(
+            "no wallpaper specified and Noctalia cache not found at {}.\n\
+             pass a path: `grogu apply --extract /path/to/wallpaper.jpg`",
+            cache.display()
+        ));
+    }
+    let raw = fs::read_to_string(&cache).with_context(|| format!("read {}", cache.display()))?;
+    let json: Value =
+        serde_json::from_str(&raw).with_context(|| format!("parse {} as JSON", cache.display()))?;
+    pick_noctalia_wallpaper(&json).ok_or_else(|| {
+        anyhow!(
+            "couldn't find an active wallpaper path in {} — set $GROGU_WALLPAPER or pass --extract PATH",
+            cache.display()
+        )
+    })
+}
+
+fn noctalia_wallpaper_cache_path() -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os("NOCTALIA_CACHE_DIR") {
+        return Ok(PathBuf::from(p).join("wallpapers.json"));
+    }
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .ok_or_else(|| anyhow!("neither XDG_CACHE_HOME nor HOME is set"))?;
+    Ok(base.join("noctalia/wallpapers.json"))
+}
+
+/// Walk Noctalia's wallpaper cache JSON looking for the first
+/// readable wallpaper path. Schema has shifted across Noctalia
+/// versions, so we scan recursively for any string that names an
+/// existing file. We prefer the `dark` key when an object has one.
+fn pick_noctalia_wallpaper(v: &Value) -> Option<PathBuf> {
+    fn walk(v: &Value) -> Option<PathBuf> {
+        match v {
+            Value::String(s) => {
+                let pb = PathBuf::from(s);
+                if pb.is_file() {
+                    return Some(pb);
+                }
+                None
+            }
+            Value::Array(arr) => arr.iter().find_map(walk),
+            Value::Object(obj) => {
+                if let Some(d) = obj.get("dark").and_then(walk) {
+                    return Some(d);
+                }
+                obj.values().find_map(walk)
+            }
+            _ => None,
+        }
+    }
+    walk(v)
+}
+
+const EXTRACT_K: usize = 12;
+const EXTRACT_MAX_ITER: usize = 20;
+const EXTRACT_SAMPLE_DIM: u32 = 256;
+
+/// Extract a Theme from a wallpaper image via k-means clustering in
+/// Lab colour space. Role assignment is heuristic; values are clamped
+/// so terminals stay readable regardless of how dark/light the input is.
+fn extract_palette(path: &Path) -> Result<Theme> {
+    let img = image::open(path).with_context(|| format!("open {}", path.display()))?;
+    let thumb = img
+        .thumbnail(EXTRACT_SAMPLE_DIM, EXTRACT_SAMPLE_DIM)
+        .to_rgb8();
+    let rgb = thumb.into_raw();
+    let srgb: &[Srgb<u8>] = from_component_slice(&rgb);
+    let lab: Vec<Lab> = srgb
+        .iter()
+        .map(|p| p.into_format::<f32>().into_color())
+        .collect();
+
+    // Run k-means a few times with different seeds; keep the result
+    // with the lowest "score" (within-cluster variance).
+    let mut best: Option<Kmeans<Lab>> = None;
+    for seed in [0u64, 1, 2] {
+        let run = get_kmeans_hamerly(EXTRACT_K, EXTRACT_MAX_ITER, 5.0, false, &lab, seed);
+        best = Some(match best.take() {
+            Some(prev) if prev.score <= run.score => prev,
+            _ => run,
+        });
+    }
+    let run = best.ok_or_else(|| anyhow!("k-means returned no result"))?;
+    let centroids: Vec<Lab> = Lab::sort_indexed_colors(&run.centroids, &run.indices)
+        .into_iter()
+        .map(|c| c.centroid)
+        .collect();
+
+    let mut by_l = centroids.clone();
+    by_l.sort_by(|a, b| a.l.partial_cmp(&b.l).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Pin a usable bg/fg even if the wallpaper is uniformly light or
+    // dark — terminals need contrast.
+    let bg_lab = clamp_lightness(by_l[0], 6.0, 16.0);
+    let bg_hl_lab = clamp_lightness(by_l.get(1).copied().unwrap_or(by_l[0]), 18.0, 28.0);
+    let fg_lab = clamp_lightness(*by_l.last().unwrap(), 78.0, 92.0);
+    let light_fg_lab = clamp_lightness(
+        by_l.get(by_l.len().saturating_sub(2))
+            .copied()
+            .unwrap_or(fg_lab),
+        65.0,
+        82.0,
+    );
+    let dim_lab = by_l
+        .get(by_l.len() / 4)
+        .copied()
+        .map(|c| clamp_lightness(c, 28.0, 45.0))
+        .unwrap_or(bg_hl_lab);
+
+    let mid: Vec<Lab> = by_l
+        .iter()
+        .filter(|c| c.l > 25.0 && c.l < 75.0)
+        .copied()
+        .collect();
+    let accent_pool: Vec<Lab> = if mid.len() >= 3 {
+        mid
+    } else {
+        centroids.clone()
+    };
+
+    let red = pick_accent(&accent_pool, 25.0);
+    let yellow = pick_accent(&accent_pool, 80.0);
+    let green = pick_accent(&accent_pool, 130.0);
+    let cyan = pick_accent(&accent_pool, 180.0);
+    let blue = pick_accent(&accent_pool, 230.0);
+    let purple = pick_accent(&accent_pool, 290.0);
+
+    let black_lab = Lab::new(bg_lab.l * 0.5, bg_lab.a, bg_lab.b);
+
+    Ok(Theme {
+        slug: "grogu-extracted".into(),
+        noctalia: "Grogu".into(),
+        noctalia_custom: true,
+        bg: lab_to_hex(bg_lab),
+        bg_hl: lab_to_hex(bg_hl_lab),
+        fg: lab_to_hex(fg_lab),
+        dim: lab_to_hex(dim_lab),
+        black: lab_to_hex(black_lab),
+        light_fg: lab_to_hex(light_fg_lab),
+        red: lab_to_hex(red),
+        green: lab_to_hex(green),
+        yellow: lab_to_hex(yellow),
+        blue: lab_to_hex(blue),
+        purple: lab_to_hex(purple),
+        cyan: lab_to_hex(cyan),
+    })
+}
+
+fn clamp_lightness(c: Lab, min_l: f32, max_l: f32) -> Lab {
+    let l = c.l.clamp(min_l, max_l);
+    Lab::new(l, c.a, c.b)
+}
+
+/// Pick the cluster whose hue is closest to `target_hue_deg`, then
+/// pull its chroma toward the target — strongly when the wallpaper
+/// lacks that hue (otherwise red/yellow/green/cyan/blue/purple all
+/// collapse to the same colour on monochromatic wallpapers).
+fn pick_accent(pool: &[Lab], target_hue_deg: f32) -> Lab {
+    let pick = pool
+        .iter()
+        .min_by(|a, b| {
+            let da = hue_distance(lab_hue_deg(**a), target_hue_deg);
+            let db = hue_distance(lab_hue_deg(**b), target_hue_deg);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .copied()
+        .unwrap_or(Lab::new(60.0, 0.0, 0.0));
+    let hue_dist = hue_distance(lab_hue_deg(pick), target_hue_deg);
+    let chroma = (pick.a * pick.a + pick.b * pick.b).sqrt();
+    // Aggressive blend when the wallpaper doesn't naturally have this
+    // hue, mild blend when chroma is low, none when the match is good.
+    let blend = if hue_dist > 45.0 {
+        0.75
+    } else if hue_dist > 20.0 {
+        0.45
+    } else if chroma < 25.0 {
+        0.4
+    } else {
+        0.0
+    };
+    let target_rad = target_hue_deg.to_radians();
+    let target_a = target_rad.cos() * 45.0;
+    let target_b = target_rad.sin() * 45.0;
+    let a = pick.a * (1.0 - blend) + target_a * blend;
+    let b = pick.b * (1.0 - blend) + target_b * blend;
+    let l = pick.l.clamp(55.0, 75.0);
+    Lab::new(l, a, b)
+}
+
+fn lab_hue_deg(c: Lab) -> f32 {
+    let h = c.b.atan2(c.a).to_degrees();
+    if h < 0.0 {
+        h + 360.0
+    } else {
+        h
+    }
+}
+
+fn hue_distance(a: f32, b: f32) -> f32 {
+    let d = (a - b).abs() % 360.0;
+    d.min(360.0 - d)
+}
+
+fn lab_to_hex(c: Lab) -> String {
+    let rgb: Srgb = Srgb::from_color(c);
+    let r = (rgb.red.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let g = (rgb.green.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let b = (rgb.blue.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+fn print_theme(t: &Theme) {
+    println!("slug:     {}", t.slug);
+    println!("noctalia: {} (custom: {})", t.noctalia, t.noctalia_custom);
+    println!("bg       {}", t.bg);
+    println!("bg_hl    {}", t.bg_hl);
+    println!("fg       {}", t.fg);
+    println!("light_fg {}", t.light_fg);
+    println!("dim      {}", t.dim);
+    println!("black    {}", t.black);
+    println!("red      {}", t.red);
+    println!("green    {}", t.green);
+    println!("yellow   {}", t.yellow);
+    println!("blue     {}", t.blue);
+    println!("purple   {}", t.purple);
+    println!("cyan     {}", t.cyan);
 }
