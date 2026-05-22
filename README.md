@@ -9,6 +9,8 @@ desktop in one shot:
 | **[niri](https://github.com/YaLTeR/niri)** | writes `~/.config/niri/grogu.kdl`, an include-able snippet with focus-ring colours. niri live-reloads. |
 | **[telia](https://github.com/foolish-dev/telia)** | sets the `theme` row in telia's sqlite prefs store. telia picks it up on next launch. |
 | **vim / neovim** | drops `~/.vim/colors/grogu.vim` and/or `~/.config/nvim/colors/grogu.vim`. Activate with `:colorscheme grogu`. |
+| **[kitty](https://sw.kovidgoyal.net/kitty/)** | writes `~/.config/kitty/grogu.conf`. Activate by adding `include grogu.conf` to `kitty.conf` once; reload with `kill -SIGUSR1 $(pgrep kitty)` or kitty's default `Ctrl+Shift+F5`. |
+| **[ghostty](https://ghostty.org)** | writes `~/.config/ghostty/themes/grogu`. Activate by adding `theme = grogu` to `~/.config/ghostty/config`; ghostty live-reloads on save. |
 
 Three themes ship: `tokyo-night`, `catppuccin`, `dracula`.
 
@@ -20,6 +22,7 @@ grogu paths                      # everywhere grogu reads or writes
 grogu apply                      # defaults to telia's stored theme pref
 grogu apply --theme catppuccin
 grogu apply --no-vim --dry-run   # see what would change without touching files
+grogu apply --no-kitty --no-ghostty  # skip the terminals
 ```
 
 ## Hook it to Noctalia's wallpaper rotation
@@ -80,6 +83,20 @@ This is the same row telia's `/theme NAME` slash command writes — telia
 reads it on every launch.
 
 If telia hasn't run on the machine, grogu skips this target with a note.
+
+## Terminal reload behaviour
+
+- **ghostty** live-reloads its config on save, so a `grogu apply` repaints open windows automatically.
+- **kitty** doesn't auto-detect config changes; either set up `Ctrl+Shift+F5` (kitty's default reload bind), enable `allow_remote_control yes` and call `kitty @ set-colors --all --configured ~/.config/kitty/grogu.conf`, or just `kill -SIGUSR1 $(pgrep kitty)`.
+
+If you want grogu to ping kitty after applying, run:
+
+```sh
+grogu apply && pkill -SIGUSR1 kitty 2>/dev/null || true
+```
+
+(grogu doesn't do this itself — it keeps the binary side-effect free
+beyond file writes.)
 
 ## Env overrides
 
