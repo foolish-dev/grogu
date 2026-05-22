@@ -32,14 +32,17 @@ use std::path::PathBuf;
 #[derive(Clone)]
 struct Theme {
     slug: String,
-    /// Noctalia's bundled scheme name (e.g. "Tokyo-Night") OR "Grogu"
-    /// when `noctalia_custom` is set — then we write a full custom
-    /// scheme JSON to colorschemes/Grogu.json.
+    /// Noctalia's bundled scheme name (always one of "Tokyo-Night" /
+    /// "Catppuccin" / "Dracula"). In extract mode we pick the bundled
+    /// scheme whose palette is nearest to the extracted one — Noctalia
+    /// enumerates `colorschemes/` once at startup with no rescan IPC,
+    /// so a freshly-written custom scheme is invisible until Noctalia
+    /// restarts. Picking from the loaded set means Meta+W repaints
+    /// Noctalia immediately, every time.
     noctalia: String,
-    /// When true, write our own scheme JSON instead of relying on
-    /// Noctalia's bundled scheme of the same name. Used by v2 extract
-    /// mode where the palette comes from the wallpaper.
-    noctalia_custom: bool,
+    /// True if this palette was extracted from a wallpaper. telia and
+    /// Noctalia both fall back to a nearest-bundled name in this mode.
+    extracted: bool,
     bg: String,
     bg_hl: String,
     fg: String,
@@ -63,7 +66,7 @@ fn predefined_themes() -> Vec<Theme> {
         Theme {
             slug: "tokyo-night".into(),
             noctalia: "Tokyo-Night".into(),
-            noctalia_custom: false,
+            extracted: false,
             bg: "#1a1b26".into(),
             bg_hl: "#283457".into(),
             fg: "#c0caf5".into(),
@@ -80,7 +83,7 @@ fn predefined_themes() -> Vec<Theme> {
         Theme {
             slug: "catppuccin".into(),
             noctalia: "Catppuccin".into(),
-            noctalia_custom: false,
+            extracted: false,
             bg: "#1e1e2e".into(),
             bg_hl: "#313244".into(),
             fg: "#cdd6f4".into(),
@@ -97,7 +100,7 @@ fn predefined_themes() -> Vec<Theme> {
         Theme {
             slug: "dracula".into(),
             noctalia: "Dracula".into(),
-            noctalia_custom: false,
+            extracted: false,
             bg: "#282a36".into(),
             bg_hl: "#44475a".into(),
             fg: "#f8f8f2".into(),
@@ -164,6 +167,16 @@ enum Cmd {
         /// Skip ghostty.
         #[arg(long)]
         no_ghostty: bool,
+        /// Skip tmux.
+        #[arg(long)]
+        no_tmux: bool,
+        /// After writing every target, also live-reload running apps:
+        /// SIGUSR1 to kitty + telia, and `tmux source-file` for any
+        /// running tmux server. Designed for the Noctalia
+        /// wallpaperChange hook so Meta+W repaints the whole desktop in
+        /// one Rust call — no shell glue.
+        #[arg(long)]
+        reload: bool,
         /// Use the light variant where supported (currently: Noctalia).
         #[arg(long)]
         light: bool,
@@ -209,6 +222,7 @@ fn main() -> Result<()> {
             }
             println!("kitty conf        : {}", kitty_path()?.display());
             println!("ghostty theme     : {}", ghostty_path()?.display());
+            println!("tmux fragment     : {}", tmux_path()?.display());
         }
         Cmd::Apply {
             theme,
@@ -219,6 +233,8 @@ fn main() -> Result<()> {
             no_vim,
             no_kitty,
             no_ghostty,
+            no_tmux,
+            reload,
             light,
             dry_run,
         } => {
@@ -267,6 +283,16 @@ fn main() -> Result<()> {
             if !no_ghostty {
                 println!("  {}", apply_ghostty(&theme, dry_run)?);
             }
+            if !no_tmux {
+                println!("  {}", apply_tmux(&theme, dry_run)?);
+            }
+            if reload && !dry_run {
+                for line in reload_live_apps() {
+                    println!("  {line}");
+                }
+            } else if reload && dry_run {
+                println!("  reload: skipped (dry-run)");
+            }
             if dry_run {
                 println!("(dry-run — no files written)");
             }
@@ -276,6 +302,35 @@ fn main() -> Result<()> {
 }
 
 // -------- path helpers --------
+
+/// Atomic file write: stage to a sibling tempfile, fsync, then rename
+/// over the target. `rename` on the same filesystem is atomic on POSIX,
+/// so readers either see the old file or the new file — never a
+/// truncated one. Used for files containing user data we must preserve.
+fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("path has no parent: {}", path.display()))?;
+    let fname = path
+        .file_name()
+        .ok_or_else(|| anyhow!("path has no filename: {}", path.display()))?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(fname);
+    tmp_name.push(".grogu.tmp");
+    let tmp = parent.join(tmp_name);
+    {
+        use std::io::Write;
+        let mut f = fs::File::create(&tmp)
+            .with_context(|| format!("create tempfile {}", tmp.display()))?;
+        f.write_all(bytes)
+            .with_context(|| format!("write tempfile {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync tempfile {}", tmp.display()))?;
+    }
+    fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
 
 fn xdg_config() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("XDG_CONFIG_HOME") {
@@ -321,6 +376,10 @@ fn ghostty_path() -> Result<PathBuf> {
     Ok(xdg_config()?.join("ghostty/themes/grogu"))
 }
 
+fn tmux_path() -> Result<PathBuf> {
+    Ok(xdg_config()?.join("tmux/grogu.conf"))
+}
+
 /// Both classic vim and neovim colorscheme dirs. We write to whichever
 /// already exists; if neither exists, we create the neovim one (most
 /// common today) and skip vim.
@@ -359,29 +418,78 @@ fn apply_telia(theme: &Theme, dry_run: bool) -> Result<String> {
             path.display()
         ));
     }
-    // telia only ships three predefined themes — no custom-palette
-    // support. For extracted palettes, pick the closest predefined
-    // theme by squared-distance on accent colours.
-    let telia_slug = if theme.noctalia_custom {
+    // telia's three bundled themes (tokyo-night/catppuccin/dracula) are
+    // the fallback. For extracted palettes we ALSO write the precise
+    // hex palette to `prefs.grogu_palette` — telia v0.2+ picks that up
+    // on SIGUSR1 and paints with the wallpaper-extracted colours. For
+    // predefined-mode runs we clear the pref (empty string) so telia
+    // reverts to the named theme on next signal.
+    let telia_slug = if theme.extracted {
         nearest_predefined(theme)
     } else {
         theme.slug.clone()
     };
+    let palette_json = if theme.extracted {
+        telia_palette_json(theme)
+    } else {
+        String::new()
+    };
     if dry_run {
-        return Ok(format!(
+        let mut msg = format!(
             "telia: would set prefs.theme = '{telia_slug}' in {}",
             path.display()
-        ));
+        );
+        if theme.extracted {
+            msg.push_str(&format!(
+                "\n  telia: would set prefs.grogu_palette = ({} bytes JSON)",
+                palette_json.len()
+            ));
+        } else {
+            msg.push_str("\n  telia: would clear prefs.grogu_palette (predefined mode)");
+        }
+        return Ok(msg);
     }
     let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     conn.execute(
         "INSERT OR REPLACE INTO prefs (key, value) VALUES ('theme', ?1)",
         params![telia_slug],
     )?;
-    Ok(format!(
+    conn.execute(
+        "INSERT OR REPLACE INTO prefs (key, value) VALUES ('grogu_palette', ?1)",
+        params![palette_json],
+    )?;
+    let mut msg = format!(
         "telia: set prefs.theme = '{telia_slug}' in {}",
         path.display()
-    ))
+    );
+    if theme.extracted {
+        msg.push_str(&format!(
+            "\n  telia: set prefs.grogu_palette = ({} bytes JSON)",
+            palette_json.len()
+        ));
+    } else {
+        msg.push_str("\n  telia: cleared prefs.grogu_palette (predefined mode)");
+    }
+    Ok(msg)
+}
+
+/// Serialize the 10 telia palette fields as a flat JSON object of
+/// lowercase hex strings (`{"bg":"#1a1b26",...}`). telia's
+/// `set_custom_palette_from_json` parses exactly this shape.
+fn telia_palette_json(t: &Theme) -> String {
+    serde_json::json!({
+        "bg":     t.bg,
+        "bg_hl":  t.bg_hl,
+        "fg":     t.fg,
+        "dim":    t.dim,
+        "red":    t.red,
+        "green":  t.green,
+        "yellow": t.yellow,
+        "blue":   t.blue,
+        "purple": t.purple,
+        "cyan":   t.cyan,
+    })
+    .to_string()
 }
 
 /// Pick the predefined theme whose `bg` + `purple` come closest to an
@@ -445,119 +553,32 @@ fn apply_noctalia(theme: &Theme, dark: bool, dry_run: bool) -> Result<String> {
     );
     cs.insert("darkMode".into(), Value::Bool(dark));
 
-    // For extracted palettes we also write a full scheme JSON into
-    // Noctalia's user colorschemes/ dir. Noctalia loads bundled + user
-    // schemes by name, so "Grogu" becomes selectable next to the
-    // built-ins.
-    let custom_path = if theme.noctalia_custom {
-        Some(noctalia_custom_scheme_path(&theme.noctalia)?)
-    } else {
-        None
-    };
-
     if dry_run {
-        let mut msg = format!(
+        return Ok(format!(
             "noctalia: would set predefinedScheme={} darkMode={} at {}",
             theme.noctalia,
             dark,
             settings_path.display()
-        );
-        if let Some(p) = &custom_path {
-            msg.push_str(&format!(
-                "\n  noctalia: would write custom scheme JSON to {}",
-                p.display()
-            ));
-        }
-        return Ok(msg);
+        ));
     }
 
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let pretty = serde_json::to_string_pretty(&doc)? + "\n";
-    fs::write(&settings_path, pretty)
+    // settings.json holds user-owned Noctalia config (bar, dock, custom
+    // keys). grogu is designed to fire on every wallpaper change, so a
+    // partial write — crash, SIGKILL, concurrent run — would corrupt
+    // user data. Write atomically via a sibling tempfile + rename.
+    atomic_write(&settings_path, pretty.as_bytes())
         .with_context(|| format!("write {}", settings_path.display()))?;
 
-    let mut msg = format!(
+    Ok(format!(
         "noctalia: set predefinedScheme={} darkMode={} in {}",
         theme.noctalia,
         dark,
         settings_path.display()
-    );
-    if let Some(custom_path) = custom_path {
-        if let Some(parent) = custom_path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-        }
-        let scheme = noctalia_custom_scheme_json(theme);
-        let pretty_scheme = serde_json::to_string_pretty(&scheme)? + "\n";
-        fs::write(&custom_path, pretty_scheme)
-            .with_context(|| format!("write {}", custom_path.display()))?;
-        msg.push_str(&format!(
-            "\n  noctalia: wrote custom scheme JSON to {}",
-            custom_path.display()
-        ));
-    }
-    Ok(msg)
-}
-
-fn noctalia_custom_scheme_path(name: &str) -> Result<PathBuf> {
-    Ok(xdg_config()?
-        .join("noctalia/colorschemes")
-        .join(format!("{name}.json")))
-}
-
-/// Build a Noctalia-format scheme JSON from a Theme. Only the dark
-/// variant is populated — Noctalia tolerates a partial document and
-/// our extracted palettes don't have a sensible light variant.
-fn noctalia_custom_scheme_json(t: &Theme) -> Value {
-    serde_json::json!({
-        "dark": {
-            "mPrimary": t.blue,
-            "mOnPrimary": t.bg,
-            "mSecondary": t.purple,
-            "mOnSecondary": t.bg,
-            "mTertiary": t.green,
-            "mOnTertiary": t.bg,
-            "mError": t.red,
-            "mOnError": t.bg,
-            "mSurface": t.bg,
-            "mOnSurface": t.fg,
-            "mSurfaceVariant": t.bg_hl,
-            "mOnSurfaceVariant": t.dim,
-            "mOutline": t.dim,
-            "mShadow": t.black,
-            "mHover": t.green,
-            "mOnHover": t.bg,
-            "terminal": {
-                "normal": {
-                    "black": t.black,
-                    "red": t.red,
-                    "green": t.green,
-                    "yellow": t.yellow,
-                    "blue": t.blue,
-                    "magenta": t.purple,
-                    "cyan": t.cyan,
-                    "white": t.light_fg,
-                },
-                "bright": {
-                    "black": t.dim,
-                    "red": t.red,
-                    "green": t.green,
-                    "yellow": t.yellow,
-                    "blue": t.blue,
-                    "magenta": t.purple,
-                    "cyan": t.cyan,
-                    "white": t.fg,
-                },
-                "foreground": t.fg,
-                "background": t.bg,
-                "selectionFg": t.fg,
-                "selectionBg": t.bg_hl,
-                "cursorText": t.bg,
-                "cursor": t.fg,
-            }
-        }
-    })
+    ))
 }
 
 // -------- niri: include-able KDL snippet --------
@@ -951,6 +972,93 @@ palette = 15={fg}
     )
 }
 
+// -------- tmux: include-able set-option fragment --------
+
+fn apply_tmux(theme: &Theme, dry_run: bool) -> Result<String> {
+    let path = tmux_path()?;
+    let body = tmux_conf(theme);
+    if dry_run {
+        return Ok(format!(
+            "tmux: would write {} bytes to {}",
+            body.len(),
+            path.display()
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    fs::write(&path, &body).with_context(|| format!("write {}", path.display()))?;
+    Ok(format!(
+        "tmux: wrote {} bytes to {}",
+        body.len(),
+        path.display()
+    ))
+}
+
+fn tmux_conf(theme: &Theme) -> String {
+    format!(
+        "# grogu — generated by `grogu apply --theme {slug}`.
+# Activate in ~/.config/tmux/tmux.conf (last line, so it wins):
+#     source-file ~/.config/tmux/grogu.conf
+# Live-reload: `tmux source-file ~/.config/tmux/grogu.conf`
+
+# Core panes / messages / mode
+set -g pane-border-style          \"fg={dim}\"
+set -g pane-active-border-style   \"fg={blue}\"
+set -g message-style              \"bg={bg_hl},fg={blue},bold\"
+set -g message-command-style      \"bg={bg_hl},fg={blue}\"
+setw -g mode-style                \"bg={bg_hl},fg={fg},bold\"
+set -g popup-border-style         \"fg={dim}\"
+
+# Status bar base
+set -g status-style \"bg=default,fg={fg}\"
+
+# Status-left: session badge (red when prefix is held) + whoami
+set -g status-left \"\\
+#[bg=#{{?client_prefix,{red},{blue}}},fg={bg},bold]  #S \\
+#[bg={bg_hl},fg=#{{?client_prefix,{red},{blue}}}]\\
+#[bg={bg_hl},fg={light_fg}] #(whoami) \\
+#[bg=default,fg={bg_hl}] \"
+
+# Status-right: git · ram · loadavg · clock · date
+set -g status-right \"\\
+#[fg={bg_hl},bg=default]\\
+#[bg={bg_hl},fg={green}]  #(cd #{{pane_current_path}}; git branch --show-current 2>/dev/null || echo '-') \\
+#[bg={black},fg={bg_hl}]\\
+#[bg={black},fg={purple}]  #(~/.config/tmux/scripts/mem.sh) \\
+#[bg={bg_hl},fg={black}]\\
+#[bg={bg_hl},fg={cyan}]  #(cat /proc/loadavg | cut -d' ' -f1) \\
+#[bg={blue},fg={bg_hl}]\\
+#[bg={blue},fg={bg},bold]  %H:%M \\
+#[bg={purple},fg={blue}]\\
+#[bg={purple},fg={bg},bold] %d-%b \"
+
+# Window tabs
+setw -g window-status-format \"\\
+#[fg=default,bg={black}]\\
+#[fg={dim},bg={black}] #I  #W \\
+#[fg={black},bg=default]\"
+
+setw -g window-status-current-format \"\\
+#[fg=default,bg={bg_hl}]\\
+#[fg={blue},bg={bg_hl},bold] #I  #W#{{?window_zoomed_flag, ,}} \\
+#[fg={bg_hl},bg=default]\"
+",
+        slug = theme.slug,
+        bg = theme.bg,
+        bg_hl = theme.bg_hl,
+        fg = theme.fg,
+        dim = theme.dim,
+        black = theme.black,
+        light_fg = theme.light_fg,
+        red = theme.red,
+        green = theme.green,
+        blue = theme.blue,
+        purple = theme.purple,
+        cyan = theme.cyan,
+    )
+}
+
 // -------- v2: palette extraction from a wallpaper image --------
 
 use kmeans_colors::{get_kmeans_hamerly, Kmeans, Sort};
@@ -1108,10 +1216,10 @@ fn extract_palette(path: &Path) -> Result<Theme> {
 
     let black_lab = Lab::new(bg_lab.l * 0.5, bg_lab.a, bg_lab.b);
 
-    Ok(Theme {
+    let mut t = Theme {
         slug: "grogu-extracted".into(),
-        noctalia: "Grogu".into(),
-        noctalia_custom: true,
+        noctalia: String::new(),
+        extracted: true,
         bg: lab_to_hex(bg_lab),
         bg_hl: lab_to_hex(bg_hl_lab),
         fg: lab_to_hex(fg_lab),
@@ -1124,7 +1232,22 @@ fn extract_palette(path: &Path) -> Result<Theme> {
         blue: lab_to_hex(blue),
         purple: lab_to_hex(purple),
         cyan: lab_to_hex(cyan),
-    })
+    };
+    // Resolve the bundled Noctalia scheme name from the nearest
+    // predefined match. Noctalia can't see user-added schemes without
+    // a restart, so we must point predefinedScheme at one Noctalia
+    // already has loaded.
+    t.noctalia = nearest_predefined_noctalia(&t);
+    Ok(t)
+}
+
+fn nearest_predefined_noctalia(theme: &Theme) -> String {
+    let slug = nearest_predefined(theme);
+    predefined_themes()
+        .into_iter()
+        .find(|t| t.slug == slug)
+        .map(|t| t.noctalia)
+        .unwrap_or_else(|| "Tokyo-Night".into())
 }
 
 fn clamp_lightness(c: Lab, min_l: f32, max_l: f32) -> Lab {
@@ -1192,7 +1315,7 @@ fn lab_to_hex(c: Lab) -> String {
 
 fn print_theme(t: &Theme) {
     println!("slug:     {}", t.slug);
-    println!("noctalia: {} (custom: {})", t.noctalia, t.noctalia_custom);
+    println!("noctalia: {} (extracted: {})", t.noctalia, t.extracted);
     println!("bg       {}", t.bg);
     println!("bg_hl    {}", t.bg_hl);
     println!("fg       {}", t.fg);
@@ -1205,4 +1328,72 @@ fn print_theme(t: &Theme) {
     println!("blue     {}", t.blue);
     println!("purple   {}", t.purple);
     println!("cyan     {}", t.cyan);
+}
+
+// -------- live-reload helpers --------
+
+fn reload_live_apps() -> Vec<String> {
+    vec![
+        signal_summary("kitty", reload_signal("kitty", libc::SIGUSR1)),
+        signal_summary("telia", reload_signal("telia", libc::SIGUSR1)),
+        reload_tmux(),
+    ]
+}
+
+fn signal_summary(name: &str, count: usize) -> String {
+    if count == 0 {
+        format!("reload: {name} not running, skipped")
+    } else {
+        format!("reload: SIGUSR1 → {count} {name} process(es)")
+    }
+}
+
+fn reload_signal(name: &str, sig: i32) -> usize {
+    let entries = match fs::read_dir("/proc") {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let pid: i32 = match entry.file_name().to_string_lossy().parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let comm = match fs::read_to_string(entry.path().join("comm")) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if comm.trim() == name && unsafe { libc::kill(pid, sig) } == 0 {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn reload_tmux() -> String {
+    let path = match tmux_path() {
+        Ok(p) => p,
+        Err(e) => return format!("reload: tmux skipped ({e})"),
+    };
+    let has_server = std::process::Command::new("tmux")
+        .arg("ls")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !has_server {
+        return "reload: tmux server not running, skipped".into();
+    }
+    let status = std::process::Command::new("tmux")
+        .arg("source-file")
+        .arg(&path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => format!("reload: tmux source-file {}", path.display()),
+        Ok(s) => format!("reload: tmux source-file exited {s}"),
+        Err(e) => format!("reload: tmux source-file failed ({e})"),
+    }
 }
