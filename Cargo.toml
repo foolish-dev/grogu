@@ -1,0 +1,23 @@
+[package]
+name = "grogu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["foolish-dev"]
+description = "Sync a Tokyo Night / Catppuccin / Dracula theme across Noctalia shell, niri, telia, and vim — triggered by Noctalia's wallpaper change"
+repository = "https://github.com/foolish-dev/grogu"
+
+[[bin]]
+name = "grogu"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
