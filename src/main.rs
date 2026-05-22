@@ -24,6 +24,7 @@ use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 /// Palette for one theme. Hex strings, lowercase, with leading `#`.
 /// Values lifted from the canonical theme definitions (Tokyo Night,
@@ -364,6 +365,13 @@ fn noctalia_settings_path() -> Result<PathBuf> {
     Ok(xdg_config()?.join("noctalia/settings.json"))
 }
 
+fn noctalia_config_dir() -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os("NOCTALIA_CONFIG_DIR") {
+        return Ok(PathBuf::from(p));
+    }
+    Ok(xdg_config()?.join("noctalia"))
+}
+
 fn niri_snippet_path() -> Result<PathBuf> {
     Ok(xdg_config()?.join("niri/grogu.kdl"))
 }
@@ -529,9 +537,97 @@ fn sq_dist(a: [i32; 3], b: [i32; 3]) -> i64 {
 // -------- noctalia: JSON-patch settings.json --------
 
 fn apply_noctalia(theme: &Theme, dark: bool, dry_run: bool) -> Result<String> {
+    if theme.extracted {
+        apply_noctalia_grogu_scheme(theme, dark, dry_run)
+    } else {
+        apply_noctalia_predefined(theme, dark, dry_run)
+    }
+}
+
+fn apply_noctalia_predefined(theme: &Theme, dark: bool, dry_run: bool) -> Result<String> {
     let settings_path = noctalia_settings_path()?;
+    patch_noctalia_settings(&settings_path, &theme.noctalia, dark, dry_run)?;
+    if dry_run {
+        return Ok(format!(
+            "noctalia: would set predefinedScheme={} darkMode={} at {}",
+            theme.noctalia,
+            dark,
+            settings_path.display()
+        ));
+    }
+    // ColorSchemeService only re-runs applyScheme on darkMode changes or
+    // explicit IPC — a settings.json write that only changes
+    // predefinedScheme leaves colors.json stale until the next restart.
+    // Nudge via IPC if noctalia is up; the file write is the fallback.
+    let ipc_status = nudge_noctalia(&theme.noctalia, dark);
+    Ok(format!(
+        "noctalia: set predefinedScheme={} darkMode={} in {}{}",
+        theme.noctalia,
+        dark,
+        settings_path.display(),
+        ipc_status,
+    ))
+}
+
+// Extracted-palette path. noctalia's schemes[] is cached at startup with
+// no rescan IPC, so a fresh user scheme is invisible until restart. To
+// repaint Noctalia *now* with the wallpaper-extracted palette, grogu
+// writes ~/.config/noctalia/colors.json directly — Color.qml watches
+// that file and live-reloads every m-color binding on change. The
+// Grogu.json scheme file is also written so that on the next noctalia
+// restart, predefinedScheme="Grogu" resolves to a real scheme.
+fn apply_noctalia_grogu_scheme(theme: &Theme, dark: bool, dry_run: bool) -> Result<String> {
+    let cfg = noctalia_config_dir()?;
+    let settings_path = cfg.join("settings.json");
+    let colors_path = cfg.join("colors.json");
+    let scheme_path = cfg.join("colorschemes/Grogu/Grogu.json");
+
+    if dry_run {
+        return Ok(format!(
+            "noctalia: would write Grogu scheme to {}, live-paint via {}, set predefinedScheme=Grogu darkMode={} in {}",
+            scheme_path.display(),
+            colors_path.display(),
+            dark,
+            settings_path.display(),
+        ));
+    }
+
+    let scheme_obj = noctalia_m_colors(theme);
+    let scheme_full = serde_json::json!({
+        "dark": noctalia_scheme_variant(theme),
+        "light": noctalia_scheme_variant(theme),
+    });
+
+    if let Some(parent) = scheme_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    let scheme_pretty = serde_json::to_string_pretty(&scheme_full)? + "\n";
+    atomic_write(&scheme_path, scheme_pretty.as_bytes())
+        .with_context(|| format!("write {}", scheme_path.display()))?;
+
+    let colors_pretty = serde_json::to_string_pretty(&scheme_obj)? + "\n";
+    atomic_write(&colors_path, colors_pretty.as_bytes())
+        .with_context(|| format!("write {}", colors_path.display()))?;
+
+    patch_noctalia_settings(&settings_path, "Grogu", dark, false)?;
+
+    Ok(format!(
+        "noctalia: wrote Grogu scheme to {}, live-painted {}, set predefinedScheme=Grogu darkMode={} in {}",
+        scheme_path.display(),
+        colors_path.display(),
+        dark,
+        settings_path.display(),
+    ))
+}
+
+fn patch_noctalia_settings(
+    settings_path: &std::path::Path,
+    scheme: &str,
+    dark: bool,
+    dry_run: bool,
+) -> Result<()> {
     let mut doc: Value = if settings_path.exists() {
-        let raw = fs::read_to_string(&settings_path)
+        let raw = fs::read_to_string(settings_path)
             .with_context(|| format!("read {}", settings_path.display()))?;
         serde_json::from_str(&raw)
             .with_context(|| format!("parse {} as JSON", settings_path.display()))?
@@ -547,38 +643,105 @@ fn apply_noctalia(theme: &Theme, dark: bool, dry_run: bool) -> Result<String> {
         .as_object_mut()
         .ok_or_else(|| anyhow!("colorSchemes is not a JSON object"))?;
     cs.insert("useWallpaperColors".into(), Value::Bool(false));
-    cs.insert(
-        "predefinedScheme".into(),
-        Value::String(theme.noctalia.clone()),
-    );
+    cs.insert("predefinedScheme".into(), Value::String(scheme.into()));
     cs.insert("darkMode".into(), Value::Bool(dark));
 
     if dry_run {
-        return Ok(format!(
-            "noctalia: would set predefinedScheme={} darkMode={} at {}",
-            theme.noctalia,
-            dark,
-            settings_path.display()
-        ));
+        return Ok(());
     }
-
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let pretty = serde_json::to_string_pretty(&doc)? + "\n";
     // settings.json holds user-owned Noctalia config (bar, dock, custom
-    // keys). grogu is designed to fire on every wallpaper change, so a
-    // partial write — crash, SIGKILL, concurrent run — would corrupt
-    // user data. Write atomically via a sibling tempfile + rename.
-    atomic_write(&settings_path, pretty.as_bytes())
+    // keys). Write atomically to avoid corrupting unrelated state if
+    // grogu is interrupted mid-write.
+    atomic_write(settings_path, pretty.as_bytes())
         .with_context(|| format!("write {}", settings_path.display()))?;
+    Ok(())
+}
 
-    Ok(format!(
-        "noctalia: set predefinedScheme={} darkMode={} in {}",
-        theme.noctalia,
-        dark,
-        settings_path.display()
-    ))
+// Flat m-color map (what Color.qml's customColorsFile reads).
+fn noctalia_m_colors(t: &Theme) -> Value {
+    serde_json::json!({
+        "mPrimary": t.blue,
+        "mOnPrimary": t.bg,
+        "mSecondary": t.purple,
+        "mOnSecondary": t.bg,
+        "mTertiary": t.green,
+        "mOnTertiary": t.bg,
+        "mError": t.red,
+        "mOnError": t.bg,
+        "mSurface": t.bg,
+        "mOnSurface": t.fg,
+        "mSurfaceVariant": t.bg_hl,
+        "mOnSurfaceVariant": t.fg,
+        "mOutline": t.dim,
+        "mShadow": t.black,
+        "mHover": t.green,
+        "mOnHover": t.bg,
+    })
+}
+
+// Full scheme variant (m-colors + terminal sub-object), matching the
+// shape of Noctalia's bundled scheme JSON (e.g. Tokyo-Night.json).
+fn noctalia_scheme_variant(t: &Theme) -> Value {
+    let mut v = noctalia_m_colors(t);
+    v.as_object_mut().unwrap().insert(
+        "terminal".into(),
+        serde_json::json!({
+            "normal": {
+                "black": t.black,
+                "red": t.red,
+                "green": t.green,
+                "yellow": t.yellow,
+                "blue": t.blue,
+                "magenta": t.purple,
+                "cyan": t.cyan,
+                "white": t.fg,
+            },
+            "bright": {
+                "black": t.dim,
+                "red": t.red,
+                "green": t.green,
+                "yellow": t.yellow,
+                "blue": t.blue,
+                "magenta": t.purple,
+                "cyan": t.cyan,
+                "white": t.light_fg,
+            },
+            "foreground": t.fg,
+            "background": t.bg,
+            "selectionFg": t.fg,
+            "selectionBg": t.bg_hl,
+            "cursorText": t.bg,
+            "cursor": t.fg,
+        }),
+    );
+    v
+}
+
+fn nudge_noctalia(scheme: &str, dark: bool) -> String {
+    let dark_cmd = if dark { "setDark" } else { "setLight" };
+    let dark_ok = run_qs_ipc(&["darkMode", dark_cmd]);
+    let scheme_ok = run_qs_ipc(&["colorScheme", "set", scheme]);
+    match (dark_ok, scheme_ok) {
+        (true, true) => " (nudged via IPC)".into(),
+        (false, false) => " (IPC nudge skipped — noctalia not running?)".into(),
+        _ => " (partial IPC nudge)".into(),
+    }
+}
+
+fn run_qs_ipc(call_args: &[&str]) -> bool {
+    let mut args: Vec<&str> = vec!["-c", "noctalia-shell", "ipc", "call"];
+    args.extend_from_slice(call_args);
+    Command::new("qs")
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 // -------- niri: include-able KDL snippet --------

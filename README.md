@@ -53,9 +53,17 @@ wallpaper itself instead of reading a predefined theme. The pipeline:
 The extracted palette lands in every target:
 
 - **Noctalia** — writes a full Material-Design + ANSI scheme JSON to
-  `~/.config/noctalia/colorschemes/Grogu.json` and sets
-  `colorSchemes.predefinedScheme = "Grogu"`. Noctalia loads user
-  schemes from `colorschemes/` alongside its built-ins.
+  `~/.config/noctalia/colorschemes/Grogu/Grogu.json` (the `find
+  -mindepth 2` Noctalia uses to enumerate schemes requires that extra
+  directory), sets `colorSchemes.predefinedScheme = "Grogu"`, and
+  *also* writes the flat m-color map directly to
+  `~/.config/noctalia/colors.json`. The direct write is what makes the
+  bar repaint *now* — Noctalia's `schemes[]` is cached once at startup
+  with no rescan IPC, so a fresh user scheme is invisible until the
+  next restart, but its `Color.qml` watches `colors.json` and
+  live-reloads every binding on change. On the next Noctalia restart,
+  `predefinedScheme = "Grogu"` resolves to the scheme file written
+  above and the palette persists.
 - **niri**, **kitty**, **ghostty**, **vim/neovim** — same renderers
   as predefined mode, just parameterised over the extracted palette.
 - **telia** — telia only ships three themes (`tokyo-night`,
@@ -133,6 +141,22 @@ grogu reads the existing `settings.json` as JSON, mutates only
 `colorSchemes.useWallpaperColors` / `colorSchemes.predefinedScheme` /
 `colorSchemes.darkMode`, and writes the rest back verbatim. Other
 top-level keys (`bar`, `dock`, custom keys you added) are preserved.
+
+Predefined mode (`--theme tokyo-night|catppuccin|dracula`): the
+settings.json write alone doesn't repaint a running Noctalia —
+`ColorSchemeService` only re-runs `applyScheme` on darkMode changes or
+explicit IPC. After writing, grogu calls
+`qs -c noctalia-shell ipc call colorScheme set <Name>` and
+`darkMode setDark|setLight` to make the live shell repaint. If `qs`
+isn't on PATH or noctalia isn't running, IPC silently no-ops and the
+file write persists for the next launch.
+
+Extracted mode (`--extract`): instead of nudging IPC (which would
+error since `Grogu` isn't in the cached `schemes[]` until restart),
+grogu writes `colors.json` directly. Noctalia's `Color.qml`
+file-watches `colors.json` and live-reloads every m-color binding —
+so the bar repaints with the wallpaper-derived palette immediately,
+no restart needed.
 
 ## How the telia integration works
 
