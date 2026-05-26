@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["foolish-dev"]
-description = "Sync a Tokyo Night / Catppuccin / Dracula theme across Noctalia shell, niri, telia, and vim — triggered by Noctalia's wallpaper change"
+description = "Sync a Tokyo Night / Catppuccin / Dracula theme across Noctalia shell, niri, telia, vim, kitty, ghostty, and tmux — triggered by Noctalia's wallpaper change"
 repository = "https://github.com/foolish-dev/grogu"
 
 [[bin]]

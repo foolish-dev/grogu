@@ -11,6 +11,7 @@ desktop in one shot:
 | **vim / neovim** | drops `~/.vim/colors/grogu.vim` and/or `~/.config/nvim/colors/grogu.vim`. Activate with `:colorscheme grogu`. |
 | **[kitty](https://sw.kovidgoyal.net/kitty/)** | writes `~/.config/kitty/grogu.conf`. Activate by adding `include grogu.conf` to `kitty.conf` once; reload with `kill -SIGUSR1 $(pgrep kitty)` or kitty's default `Ctrl+Shift+F5`. |
 | **[ghostty](https://ghostty.org)** | writes `~/.config/ghostty/themes/grogu`. Activate by adding `theme = grogu` to `~/.config/ghostty/config`; ghostty live-reloads on save. |
+| **[tmux](https://github.com/tmux/tmux)** | writes `~/.config/tmux/grogu.conf`, an include-able fragment with status-bar + pane colours. Activate by adding `source-file ~/.config/tmux/grogu.conf` to `~/.config/tmux/tmux.conf` (last line); live-reload with `tmux source-file ~/.config/tmux/grogu.conf`. |
 
 Three themes ship: `tokyo-night`, `catppuccin`, `dracula`. Or extract
 a palette directly from the current wallpaper (see "v2: wallpaper
