@@ -2,7 +2,7 @@
 //!
 //! Single binary. Given a theme slug (tokyo-night | catppuccin | dracula)
 //! or `--from-telia` (reads telia's stored theme pref), grogu writes a
-//! consistent palette across four targets:
+//! consistent palette across these targets:
 //!
 //! - **Noctalia shell** — patches `colorSchemes.predefinedScheme` in
 //!   `~/.config/noctalia/settings.json` so its built-in scheme of the
@@ -14,6 +14,12 @@
 //! - **vim / neovim** — emits a colorscheme to `~/.vim/colors/grogu.vim`
 //!   and / or `~/.config/nvim/colors/grogu.vim`, whichever directory
 //!   exists. Activate with `:colorscheme grogu`.
+//! - **kitty / ghostty / tmux** — terminal palette fragments under
+//!   `~/.config/{kitty,ghostty/themes,tmux}/grogu.*`.
+//! - **SDDM greeter** — copies the wallpaper into the noctalia
+//!   greeter's `Assets/background.png` (when `--extract` is set) and
+//!   patches the `m*` colour keys in `theme.conf` so the login screen
+//!   mirrors the desktop palette.
 //!
 //! Designed to run as a Noctalia post-wallpaper-change hook (see
 //! README): when the wallpaper rotates, grogu repaints the system.
@@ -171,6 +177,9 @@ enum Cmd {
         /// Skip tmux.
         #[arg(long)]
         no_tmux: bool,
+        /// Skip the SDDM greeter background sync.
+        #[arg(long)]
+        no_sddm: bool,
         /// After writing every target, also live-reload running apps:
         /// SIGUSR1 to kitty + telia, and `tmux source-file` for any
         /// running tmux server. Designed for the Noctalia
@@ -224,6 +233,8 @@ fn main() -> Result<()> {
             println!("kitty conf        : {}", kitty_path()?.display());
             println!("ghostty theme     : {}", ghostty_path()?.display());
             println!("tmux fragment     : {}", tmux_path()?.display());
+            println!("sddm greeter bg   : {}", sddm_greeter_bg_path().display());
+            println!("sddm greeter conf : {}", sddm_greeter_conf_path().display());
         }
         Cmd::Apply {
             theme,
@@ -235,23 +246,25 @@ fn main() -> Result<()> {
             no_kitty,
             no_ghostty,
             no_tmux,
+            no_sddm,
             reload,
             light,
             dry_run,
         } => {
-            let theme = match extract {
+            let (theme, wallpaper) = match extract {
                 Some(p) => {
                     let path = if p.is_empty() { None } else { Some(p.as_str()) };
                     let wallpaper = resolve_wallpaper(path)?;
                     println!("extracting palette from: {}", wallpaper.display());
-                    extract_palette(&wallpaper)?
+                    let t = extract_palette(&wallpaper)?;
+                    (t, Some(wallpaper))
                 }
                 None => {
                     let slug = match theme {
                         Some(t) => t,
                         None => read_telia_theme()?.unwrap_or_else(|| "tokyo-night".to_string()),
                     };
-                    find_predefined(&slug).ok_or_else(|| {
+                    let t = find_predefined(&slug).ok_or_else(|| {
                         anyhow!(
                             "unknown theme '{slug}' — known: {}",
                             predefined_themes()
@@ -260,7 +273,8 @@ fn main() -> Result<()> {
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         )
-                    })?
+                    })?;
+                    (t, None)
                 }
             };
             println!("theme: {}", theme.slug);
@@ -286,6 +300,11 @@ fn main() -> Result<()> {
             }
             if !no_tmux {
                 println!("  {}", apply_tmux(&theme, dry_run)?);
+            }
+            if !no_sddm {
+                for line in apply_sddm_greeter(&theme, wallpaper.as_deref(), dry_run)? {
+                    println!("  {line}");
+                }
             }
             if reload && !dry_run {
                 for line in reload_live_apps() {
@@ -386,6 +405,20 @@ fn ghostty_path() -> Result<PathBuf> {
 
 fn tmux_path() -> Result<PathBuf> {
     Ok(xdg_config()?.join("tmux/grogu.conf"))
+}
+
+fn sddm_greeter_bg_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("GROGU_SDDM_GREETER_BG") {
+        return PathBuf::from(p);
+    }
+    PathBuf::from("/usr/share/sddm/themes/noctalia/Assets/background.png")
+}
+
+fn sddm_greeter_conf_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("GROGU_SDDM_GREETER_CONF") {
+        return PathBuf::from(p);
+    }
+    PathBuf::from("/usr/share/sddm/themes/noctalia/theme.conf")
 }
 
 /// Both classic vim and neovim colorscheme dirs. We write to whichever
@@ -1222,6 +1255,140 @@ setw -g window-status-current-format \"\\
     )
 }
 
+/// Sync the SDDM noctalia greeter to the current theme: copy the
+/// wallpaper into `Assets/background.png` (mirrors the desktop) AND
+/// patch the `m*` color keys in `theme.conf` (re-skins the login
+/// screen). Honours the dotfiles' file-perm setup — `background.png`
+/// is fool-owned 644 in a root-owned dir; `theme.conf` is root-owned
+/// mode 666. Both allow `O_TRUNC|O_WRONLY` opens without sudo (the
+/// parent dir is never modified, only file contents). Each step
+/// skips with a message instead of aborting if its file is missing
+/// or not writable, so a partial install doesn't break the wider
+/// apply.
+fn apply_sddm_greeter(
+    theme: &Theme,
+    wallpaper: Option<&Path>,
+    dry_run: bool,
+) -> Result<Vec<String>> {
+    Ok(vec![
+        write_sddm_greeter_bg(wallpaper, dry_run)?,
+        write_sddm_greeter_colors(theme, dry_run)?,
+    ])
+}
+
+fn write_sddm_greeter_bg(wallpaper: Option<&Path>, dry_run: bool) -> Result<String> {
+    let Some(src) = wallpaper else {
+        return Ok("sddm-greeter bg: skipped (no wallpaper — only updates with --extract)".into());
+    };
+    let dst = sddm_greeter_bg_path();
+    if !dst.exists() {
+        return Ok(format!(
+            "sddm-greeter bg: skipped ({} not found — noctalia greeter theme not installed)",
+            dst.display()
+        ));
+    }
+    if dry_run {
+        return Ok(format!(
+            "sddm-greeter bg: would copy {} -> {}",
+            src.display(),
+            dst.display()
+        ));
+    }
+    let bytes = fs::read(src).with_context(|| format!("read wallpaper {}", src.display()))?;
+    let mut f = match fs::OpenOptions::new().write(true).truncate(true).open(&dst) {
+        Ok(f) => f,
+        Err(e) => {
+            let p = dst.display();
+            return Ok(format!(
+                "sddm-greeter bg: skipped — can't open {p} for write ({e}); one-time fix: `sudo chown $USER:$USER {p} && sudo chmod 644 {p}`"
+            ));
+        }
+    };
+    use std::io::Write;
+    f.write_all(&bytes)
+        .with_context(|| format!("write {}", dst.display()))?;
+    f.sync_all()
+        .with_context(|| format!("fsync {}", dst.display()))?;
+    Ok(format!(
+        "sddm-greeter bg: wrote {} bytes to {} (from {})",
+        bytes.len(),
+        dst.display(),
+        src.display()
+    ))
+}
+
+fn write_sddm_greeter_colors(theme: &Theme, dry_run: bool) -> Result<String> {
+    let dst = sddm_greeter_conf_path();
+    if !dst.exists() {
+        return Ok(format!(
+            "sddm-greeter colors: skipped ({} not found — noctalia greeter theme not installed)",
+            dst.display()
+        ));
+    }
+    let existing = fs::read_to_string(&dst).with_context(|| format!("read {}", dst.display()))?;
+    let colors = noctalia_m_colors(theme);
+    let patched = patch_theme_conf(&existing, &colors);
+    if patched == existing {
+        return Ok(format!(
+            "sddm-greeter colors: unchanged ({})",
+            dst.display()
+        ));
+    }
+    if dry_run {
+        return Ok(format!(
+            "sddm-greeter colors: would patch {} m* keys in {}",
+            colors.as_object().map(|m| m.len()).unwrap_or(0),
+            dst.display()
+        ));
+    }
+    let mut f = match fs::OpenOptions::new().write(true).truncate(true).open(&dst) {
+        Ok(f) => f,
+        Err(e) => {
+            let p = dst.display();
+            return Ok(format!(
+                "sddm-greeter colors: skipped — can't open {p} for write ({e}); one-time fix: `sudo chmod 666 {p}`"
+            ));
+        }
+    };
+    use std::io::Write;
+    f.write_all(patched.as_bytes())
+        .with_context(|| format!("write {}", dst.display()))?;
+    f.sync_all()
+        .with_context(|| format!("fsync {}", dst.display()))?;
+    Ok(format!(
+        "sddm-greeter colors: patched {} m* keys in {}",
+        colors.as_object().map(|m| m.len()).unwrap_or(0),
+        dst.display()
+    ))
+}
+
+/// Rewrite an SDDM theme.conf preserving every line except `mFoo=...`
+/// pairs whose key appears in `colors`. Non-`m*` keys, comments, blank
+/// lines, and unknown `m*` keys are passed through verbatim. Lines
+/// without `=` (comments, blanks) are also untouched.
+fn patch_theme_conf(existing: &str, colors: &Value) -> String {
+    let colors_obj = match colors.as_object() {
+        Some(o) => o,
+        None => return existing.to_string(),
+    };
+    let mut out: Vec<String> = Vec::with_capacity(existing.lines().count());
+    for line in existing.lines() {
+        if let Some(eq) = line.find('=') {
+            let key = line[..eq].trim();
+            if let Some(v) = colors_obj.get(key).and_then(|x| x.as_str()) {
+                out.push(format!("{key}={v}"));
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+    let mut result = out.join("\n");
+    if existing.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
 // -------- v2: palette extraction from a wallpaper image --------
 
 use kmeans_colors::{get_kmeans_hamerly, Kmeans, Sort};
@@ -1558,5 +1725,73 @@ fn reload_tmux() -> String {
         Ok(s) if s.success() => format!("reload: tmux source-file {}", path.display()),
         Ok(s) => format!("reload: tmux source-file exited {s}"),
         Err(e) => format!("reload: tmux source-file failed ({e})"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn patch_theme_conf_replaces_known_keys_and_preserves_rest() {
+        let input = "# Path to the background image\n\
+            background=Assets/background.png\n\
+            \n\
+            # Font Family\n\
+            fontFamily=\"Fira Sans\"\n\
+            \n\
+            mPrimary=#76946a\n\
+            mOnPrimary=#e6e1e5\n\
+            mUnknown=#deadbe\n";
+        let colors = json!({
+            "mPrimary": "#71b3ca",
+            "mOnPrimary": "#181307",
+        });
+        let out = patch_theme_conf(input, &colors);
+        assert!(out.contains("mPrimary=#71b3ca"));
+        assert!(out.contains("mOnPrimary=#181307"));
+        assert!(out.contains("background=Assets/background.png"));
+        assert!(out.contains("# Path to the background image"));
+        assert!(out.contains("fontFamily=\"Fira Sans\""));
+        assert!(out.contains("mUnknown=#deadbe"));
+        assert!(out.ends_with('\n'));
+        assert!(!out.contains("#76946a"));
+    }
+
+    #[test]
+    fn patch_theme_conf_preserves_input_when_no_keys_match() {
+        let input = "background=Assets/background.png\n# nothing to do\n";
+        let colors = json!({ "mPrimary": "#000000" });
+        let out = patch_theme_conf(input, &colors);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn patch_theme_conf_passes_through_when_colors_not_object() {
+        let input = "mPrimary=#76946a\n";
+        let colors = json!("not an object");
+        let out = patch_theme_conf(input, &colors);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn patch_theme_conf_handles_no_trailing_newline() {
+        let input = "mPrimary=#76946a";
+        let colors = json!({ "mPrimary": "#71b3ca" });
+        let out = patch_theme_conf(input, &colors);
+        assert_eq!(out, "mPrimary=#71b3ca");
+    }
+
+    #[test]
+    fn patch_theme_conf_no_prefix_collision_between_msurface_and_msurfacevariant() {
+        let input = "mSurface=#000000\nmSurfaceVariant=#111111\n";
+        let colors = json!({
+            "mSurface": "#aaaaaa",
+            "mSurfaceVariant": "#bbbbbb",
+        });
+        let out = patch_theme_conf(input, &colors);
+        assert!(out.contains("mSurface=#aaaaaa\n"));
+        assert!(out.contains("mSurfaceVariant=#bbbbbb\n"));
     }
 }
