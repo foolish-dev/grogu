@@ -20,6 +20,8 @@
 //!   greeter's `Assets/background.png` (when `--extract` is set) and
 //!   patches the `m*` colour keys in `theme.conf` so the login screen
 //!   mirrors the desktop palette.
+//! - **Keyboard backlight** — `asusctl aura effect static -c <hex>`
+//!   to match the primary accent on ASUS Aura keyboards.
 //!
 //! Designed to run as a Noctalia post-wallpaper-change hook (see
 //! README): when the wallpaper rotates, grogu repaints the system.
@@ -180,6 +182,9 @@ enum Cmd {
         /// Skip the SDDM greeter background sync.
         #[arg(long)]
         no_sddm: bool,
+        /// Skip the keyboard backlight (asusctl aura) sync.
+        #[arg(long)]
+        no_kbd: bool,
         /// After writing every target, also live-reload running apps:
         /// SIGUSR1 to kitty + telia, and `tmux source-file` for any
         /// running tmux server. Designed for the Noctalia
@@ -247,6 +252,7 @@ fn main() -> Result<()> {
             no_ghostty,
             no_tmux,
             no_sddm,
+            no_kbd,
             reload,
             light,
             dry_run,
@@ -305,6 +311,9 @@ fn main() -> Result<()> {
                 for line in apply_sddm_greeter(&theme, wallpaper.as_deref(), dry_run)? {
                     println!("  {line}");
                 }
+            }
+            if !no_kbd {
+                println!("  {}", apply_kbd(&theme, dry_run)?);
             }
             if reload && !dry_run {
                 for line in reload_live_apps() {
@@ -1360,6 +1369,34 @@ fn write_sddm_greeter_colors(theme: &Theme, dry_run: bool) -> Result<String> {
         colors.as_object().map(|m| m.len()).unwrap_or(0),
         dst.display()
     ))
+}
+
+/// Drive the ASUS Aura keyboard backlight to a static colour matching
+/// the current palette's primary accent (`theme.blue`, same value
+/// noctalia uses for `mPrimary`). Best-effort: if `asusctl` isn't
+/// installed or `asusd` isn't running, return a skip message instead
+/// of failing the apply.
+fn apply_kbd(theme: &Theme, dry_run: bool) -> Result<String> {
+    let raw = theme.blue.trim_start_matches('#');
+    if dry_run {
+        return Ok(format!(
+            "kbd: would run `asusctl aura effect static -c {raw}`"
+        ));
+    }
+    let status = Command::new("asusctl")
+        .args(["aura", "effect", "static", "-c", raw])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => Ok(format!("kbd: asusctl aura effect static -c {raw}")),
+        Ok(s) => Ok(format!(
+            "kbd: skipped — asusctl exited {s} (is asusd running?)"
+        )),
+        Err(e) => Ok(format!(
+            "kbd: skipped (asusctl not available: {e}) — install asusctl if you want backlight sync"
+        )),
+    }
 }
 
 /// Rewrite an SDDM theme.conf preserving every line except `mFoo=...`
