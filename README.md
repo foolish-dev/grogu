@@ -7,10 +7,13 @@ desktop in one shot:
 | --- | --- |
 | **[Noctalia shell](https://github.com/noctalia-dev/noctalia-shell)** | patches `colorSchemes.predefinedScheme` + `darkMode` in `~/.config/noctalia/settings.json`. The matching built-in scheme activates immediately. |
 | **[niri](https://github.com/YaLTeR/niri)** | writes `~/.config/niri/grogu.kdl`, an include-able snippet with focus-ring colours. niri live-reloads. |
-| **[telia](https://github.com/foolish-dev/telia)** | sets the `theme` row in telia's sqlite prefs store. telia picks it up on next launch. |
+| **[teleia](https://github.com/foolish-dev/teleia)** | sets the `theme` row in teleia's sqlite prefs store (plus the exact extracted palette as `grogu_palette` in extract mode). teleia picks it up on next launch, or on SIGUSR1 with `--reload`. |
 | **vim / neovim** | drops `~/.vim/colors/grogu.vim` and/or `~/.config/nvim/colors/grogu.vim`. Activate with `:colorscheme grogu`. |
-| **[kitty](https://sw.kovidgoyal.net/kitty/)** | writes `~/.config/kitty/grogu.conf`. Activate by adding `include grogu.conf` to `kitty.conf` once; reload with `kill -SIGUSR1 $(pgrep kitty)` or kitty's default `Ctrl+Shift+F5`. |
+| **[kitty](https://sw.kovidgoyal.net/kitty/)** | writes `~/.config/kitty/grogu.conf`. Activate by adding `include grogu.conf` to `kitty.conf` once; reload with `--reload`, `kill -SIGUSR1 $(pgrep kitty)`, or kitty's default `Ctrl+Shift+F5`. |
 | **[ghostty](https://ghostty.org)** | writes `~/.config/ghostty/themes/grogu`. Activate by adding `theme = grogu` to `~/.config/ghostty/config`; ghostty live-reloads on save. |
+| **[tmux](https://github.com/tmux/tmux)** | writes `~/.config/tmux/grogu.conf` (panes, messages, full status bar). Activate with `source-file ~/.config/tmux/grogu.conf` as the last line of `tmux.conf`; `--reload` re-sources it on a running server. |
+| **SDDM greeter** | with `--extract`, copies the wallpaper into the noctalia SDDM theme's `Assets/background.png` and patches the `m*` colour keys in its `theme.conf`, so the login screen mirrors the desktop. Skips with a note when the theme isn't installed or files aren't writable. |
+| **keyboard backlight** | `asusctl aura effect static -c <primary accent>` on ASUS Aura keyboards. Skips when `asusctl`/`asusd` is unavailable. |
 
 Three themes ship: `tokyo-night`, `catppuccin`, `dracula`. Or extract
 a palette directly from the current wallpaper (see "v2: wallpaper
@@ -21,10 +24,11 @@ cargo install --path .
 
 grogu list                       # tokyo-night / catppuccin / dracula
 grogu paths                      # everywhere grogu reads or writes
-grogu apply                      # defaults to telia's stored theme pref
+grogu apply                      # defaults to teleia's stored theme pref
 grogu apply --theme catppuccin
 grogu apply --no-vim --dry-run   # see what would change without touching files
 grogu apply --no-kitty --no-ghostty  # skip the terminals
+grogu apply --reload             # also live-reload kitty, teleia and tmux
 
 # v2: derive the whole palette from the current wallpaper
 grogu apply --extract                              # reads Noctalia's wallpaper cache
@@ -49,6 +53,9 @@ wallpaper itself instead of reading a predefined theme. The pipeline:
    230°, 290°), then pull its chroma toward the target hue when the
    wallpaper doesn't have that colour — otherwise monochromatic
    wallpapers would collapse half the accents into one shade.
+6. Derive the bright accents (ANSI 9–14) from the normal ones by
+   raising Lab lightness, hue and chroma untouched. (Predefined themes
+   use their upstream's canonical bright values instead.)
 
 The extracted palette lands in every target:
 
@@ -66,10 +73,11 @@ The extracted palette lands in every target:
   above and the palette persists.
 - **niri**, **kitty**, **ghostty**, **vim/neovim** — same renderers
   as predefined mode, just parameterised over the extracted palette.
-- **telia** — telia only ships three themes (`tokyo-night`,
-  `catppuccin`, `dracula`) with no custom-palette support, so grogu
-  picks the *nearest* predefined theme by squared-distance on
-  `bg + purple` in sRGB and writes that name to telia's pref store.
+- **teleia** — grogu writes the *nearest* predefined theme name
+  (squared-distance on `bg + purple` in sRGB) as the fallback, plus the
+  exact extracted palette as a `grogu_palette` JSON pref. teleia v0.2+
+  reads the palette on SIGUSR1 (sent by `--reload`) and paints with the
+  wallpaper-derived colours; older teleias just use the nearest theme.
 
 Wallpaper source resolution order:
 
@@ -95,16 +103,17 @@ Add a hook that runs after a wallpaper change:
 
 ```
 event: wallpaper.changed
-command: grogu apply --extract
+command: grogu apply --extract --reload
 ```
 
-(Drop `--extract` if you'd rather lock to a predefined theme.)
+(Drop `--extract` if you'd rather lock to a predefined theme;
+`--reload` makes running kitty/teleia/tmux repaint immediately.)
 If Noctalia's hook system can pass the new wallpaper path as an
 argument, set the command to `grogu apply --extract %{wallpaper}` —
 otherwise grogu reads the path back out of Noctalia's wallpaper cache.
 
 Now every wallpaper rotation re-paints the rest of the desktop. niri
-picks up the new colours automatically (live reload), telia uses the
+picks up the new colours automatically (live reload), teleia uses the
 updated theme on next launch, and the next time you open vim,
 `colorscheme grogu` reflects the new palette.
 
@@ -158,34 +167,35 @@ file-watches `colors.json` and live-reloads every m-color binding —
 so the bar repaints with the wallpaper-derived palette immediately,
 no restart needed.
 
-## How the telia integration works
+## How the teleia integration works
 
-grogu opens telia's sqlite store at
-`$XDG_DATA_HOME/telia/telia.sqlite` (or `~/.local/share/telia/telia.sqlite`)
+grogu opens teleia's sqlite store at
+`$XDG_DATA_HOME/teleia/teleia.sqlite` (or `~/.local/share/teleia/teleia.sqlite`)
 and does an `INSERT OR REPLACE INTO prefs (key, value) VALUES ('theme', ?)`.
-This is the same row telia's `/theme NAME` slash command writes — telia
-reads it on every launch.
+This is the same row teleia's `/theme NAME` slash command writes — teleia
+reads it on every launch. In extract mode grogu also writes the full
+palette to the `grogu_palette` pref (cleared again in predefined mode);
+see the extraction section above.
 
-If telia hasn't run on the machine, grogu skips this target with a note.
+If teleia hasn't run on the machine, grogu skips this target with a note.
 
 ## Terminal reload behaviour
 
 - **ghostty** live-reloads its config on save, so a `grogu apply` repaints open windows automatically.
-- **kitty** doesn't auto-detect config changes; either set up `Ctrl+Shift+F5` (kitty's default reload bind), enable `allow_remote_control yes` and call `kitty @ set-colors --all --configured ~/.config/kitty/grogu.conf`, or just `kill -SIGUSR1 $(pgrep kitty)`.
-
-If you want grogu to ping kitty after applying, run:
-
-```sh
-grogu apply && pkill -SIGUSR1 kitty 2>/dev/null || true
-```
-
-(grogu doesn't do this itself — it keeps the binary side-effect free
-beyond file writes.)
+- **kitty**, **teleia** and **tmux** don't auto-detect changes. Pass
+  `--reload` and grogu handles them itself: SIGUSR1 to every running
+  `kitty` and `teleia` process, and `tmux source-file` against a running
+  tmux server. Without `--reload`, grogu only writes files — reload
+  manually with `kill -SIGUSR1 $(pgrep kitty)` / kitty's default
+  `Ctrl+Shift+F5`, or wait for the next launch.
 
 ## Env overrides
 
 - `NOCTALIA_CONFIG_DIR` / `NOCTALIA_SETTINGS_FILE` — point at a non-default Noctalia install
-- `XDG_CONFIG_HOME` / `XDG_DATA_HOME` — standard XDG overrides for niri / telia paths
+- `NOCTALIA_CACHE_DIR` — where to find `wallpapers.json` in extract mode
+- `GROGU_WALLPAPER` — wallpaper to extract from (beats the Noctalia cache, loses to an explicit `--extract PATH`)
+- `GROGU_SDDM_GREETER_BG` / `GROGU_SDDM_GREETER_CONF` — the SDDM greeter files to sync
+- `XDG_CONFIG_HOME` / `XDG_DATA_HOME` — standard XDG overrides for niri / teleia paths
 
 ## License
 
