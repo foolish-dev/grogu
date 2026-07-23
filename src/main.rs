@@ -68,6 +68,16 @@ struct Theme {
     blue: String,
     purple: String,
     cyan: String,
+    /// ANSI bright accents (colors 9–14). Canonical values where the
+    /// upstream theme defines them (Tokyo Night, Dracula); identical to
+    /// the normal accents where it doesn't (Catppuccin). In extract
+    /// mode, derived from the accents by raising Lab lightness.
+    bright_red: String,
+    bright_green: String,
+    bright_yellow: String,
+    bright_blue: String,
+    bright_purple: String,
+    bright_cyan: String,
 }
 
 fn predefined_themes() -> Vec<Theme> {
@@ -88,6 +98,12 @@ fn predefined_themes() -> Vec<Theme> {
             blue: "#7aa2f7".into(),
             purple: "#bb9af7".into(),
             cyan: "#7dcfff".into(),
+            bright_red: "#ff899d".into(),
+            bright_green: "#9fe044".into(),
+            bright_yellow: "#faba4a".into(),
+            bright_blue: "#8db0ff".into(),
+            bright_purple: "#c7a9ff".into(),
+            bright_cyan: "#a4daff".into(),
         },
         Theme {
             slug: "catppuccin".into(),
@@ -105,6 +121,13 @@ fn predefined_themes() -> Vec<Theme> {
             blue: "#89b4fa".into(),
             purple: "#cba6f7".into(),
             cyan: "#94e2d5".into(),
+            // Catppuccin's kitty theme keeps bright == normal.
+            bright_red: "#f38ba8".into(),
+            bright_green: "#a6e3a1".into(),
+            bright_yellow: "#f9e2af".into(),
+            bright_blue: "#89b4fa".into(),
+            bright_purple: "#cba6f7".into(),
+            bright_cyan: "#94e2d5".into(),
         },
         Theme {
             slug: "dracula".into(),
@@ -122,6 +145,14 @@ fn predefined_themes() -> Vec<Theme> {
             blue: "#8be9fd".into(),
             purple: "#bd93f9".into(),
             cyan: "#8be9fd".into(),
+            // Brights of the roles as mapped above (blue role = #8be9fd,
+            // so its bright is Dracula's bright cyan).
+            bright_red: "#ff6e6e".into(),
+            bright_green: "#69ff94".into(),
+            bright_yellow: "#ffffa5".into(),
+            bright_blue: "#a4ffff".into(),
+            bright_purple: "#d6acff".into(),
+            bright_cyan: "#a4ffff".into(),
         },
     ]
 }
@@ -349,8 +380,8 @@ fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     let tmp = parent.join(tmp_name);
     {
         use std::io::Write;
-        let mut f = fs::File::create(&tmp)
-            .with_context(|| format!("create tempfile {}", tmp.display()))?;
+        let mut f =
+            fs::File::create(&tmp).with_context(|| format!("create tempfile {}", tmp.display()))?;
         f.write_all(bytes)
             .with_context(|| format!("write tempfile {}", tmp.display()))?;
         f.sync_all()
@@ -744,12 +775,12 @@ fn noctalia_scheme_variant(t: &Theme) -> Value {
             },
             "bright": {
                 "black": t.dim,
-                "red": t.red,
-                "green": t.green,
-                "yellow": t.yellow,
-                "blue": t.blue,
-                "magenta": t.purple,
-                "cyan": t.cyan,
+                "red": t.bright_red,
+                "green": t.bright_green,
+                "yellow": t.bright_yellow,
+                "blue": t.bright_blue,
+                "magenta": t.bright_purple,
+                "cyan": t.bright_cyan,
                 "white": t.light_fg,
             },
             "foreground": t.fg,
@@ -1005,12 +1036,12 @@ let g:terminal_color_5  = "{purple}"
 let g:terminal_color_6  = "{cyan}"
 let g:terminal_color_7  = "{fg}"
 let g:terminal_color_8  = "{dim}"
-let g:terminal_color_9  = "{red}"
-let g:terminal_color_10 = "{green}"
-let g:terminal_color_11 = "{yellow}"
-let g:terminal_color_12 = "{blue}"
-let g:terminal_color_13 = "{purple}"
-let g:terminal_color_14 = "{cyan}"
+let g:terminal_color_9  = "{bright_red}"
+let g:terminal_color_10 = "{bright_green}"
+let g:terminal_color_11 = "{bright_yellow}"
+let g:terminal_color_12 = "{bright_blue}"
+let g:terminal_color_13 = "{bright_purple}"
+let g:terminal_color_14 = "{bright_cyan}"
 let g:terminal_color_15 = "{fg}"
 "#,
         slug = theme.slug,
@@ -1024,6 +1055,12 @@ let g:terminal_color_15 = "{fg}"
         blue = theme.blue,
         purple = theme.purple,
         cyan = theme.cyan,
+        bright_red = theme.bright_red,
+        bright_green = theme.bright_green,
+        bright_yellow = theme.bright_yellow,
+        bright_blue = theme.bright_blue,
+        bright_purple = theme.bright_purple,
+        bright_cyan = theme.bright_cyan,
     )
 }
 
@@ -1080,12 +1117,12 @@ color7  {light_fg}
 
 # bright
 color8  {dim}
-color9  {red}
-color10 {green}
-color11 {yellow}
-color12 {blue}
-color13 {purple}
-color14 {cyan}
+color9  {bright_red}
+color10 {bright_green}
+color11 {bright_yellow}
+color12 {bright_blue}
+color13 {bright_purple}
+color14 {bright_cyan}
 color15 {fg}
 ",
         slug = theme.slug,
@@ -1101,6 +1138,12 @@ color15 {fg}
         blue = theme.blue,
         purple = theme.purple,
         cyan = theme.cyan,
+        bright_red = theme.bright_red,
+        bright_green = theme.bright_green,
+        bright_yellow = theme.bright_yellow,
+        bright_blue = theme.bright_blue,
+        bright_purple = theme.bright_purple,
+        bright_cyan = theme.bright_cyan,
     )
 }
 
@@ -1153,12 +1196,12 @@ palette = 5={purple}
 palette = 6={cyan}
 palette = 7={light_fg}
 palette = 8={dim}
-palette = 9={red}
-palette = 10={green}
-palette = 11={yellow}
-palette = 12={blue}
-palette = 13={purple}
-palette = 14={cyan}
+palette = 9={bright_red}
+palette = 10={bright_green}
+palette = 11={bright_yellow}
+palette = 12={bright_blue}
+palette = 13={bright_purple}
+palette = 14={bright_cyan}
 palette = 15={fg}
 ",
         slug = theme.slug,
@@ -1174,6 +1217,12 @@ palette = 15={fg}
         blue = theme.blue,
         purple = theme.purple,
         cyan = theme.cyan,
+        bright_red = theme.bright_red,
+        bright_green = theme.bright_green,
+        bright_yellow = theme.bright_yellow,
+        bright_blue = theme.bright_blue,
+        bright_purple = theme.bright_purple,
+        bright_cyan = theme.bright_cyan,
     )
 }
 
@@ -1599,6 +1648,12 @@ fn extract_palette(path: &Path) -> Result<Theme> {
         blue: lab_to_hex(blue),
         purple: lab_to_hex(purple),
         cyan: lab_to_hex(cyan),
+        bright_red: lab_to_hex(brighten(red)),
+        bright_green: lab_to_hex(brighten(green)),
+        bright_yellow: lab_to_hex(brighten(yellow)),
+        bright_blue: lab_to_hex(brighten(blue)),
+        bright_purple: lab_to_hex(brighten(purple)),
+        bright_cyan: lab_to_hex(brighten(cyan)),
     };
     // Resolve the bundled Noctalia scheme name from the nearest
     // predefined match. Noctalia can't see user-added schemes without
@@ -1620,6 +1675,13 @@ fn nearest_predefined_noctalia(theme: &Theme) -> String {
 fn clamp_lightness(c: Lab, min_l: f32, max_l: f32) -> Lab {
     let l = c.l.clamp(min_l, max_l);
     Lab::new(l, c.a, c.b)
+}
+
+/// Bright variant of an accent: same hue and chroma, lightness raised.
+/// Accents come out of `pick_accent` with L in 55–75, so brights land
+/// in 67–87 and stay visually distinct from their normal counterpart.
+fn brighten(c: Lab) -> Lab {
+    Lab::new((c.l + 12.0).min(87.0), c.a, c.b)
 }
 
 /// Pick the cluster whose hue is closest to `target_hue_deg`, then
@@ -1695,6 +1757,12 @@ fn print_theme(t: &Theme) {
     println!("blue     {}", t.blue);
     println!("purple   {}", t.purple);
     println!("cyan     {}", t.cyan);
+    println!("br.red    {}", t.bright_red);
+    println!("br.green  {}", t.bright_green);
+    println!("br.yellow {}", t.bright_yellow);
+    println!("br.blue   {}", t.bright_blue);
+    println!("br.purple {}", t.bright_purple);
+    println!("br.cyan   {}", t.bright_cyan);
 }
 
 // -------- live-reload helpers --------
@@ -1818,6 +1886,35 @@ mod tests {
         let colors = json!({ "mPrimary": "#71b3ca" });
         let out = patch_theme_conf(input, &colors);
         assert_eq!(out, "mPrimary=#71b3ca");
+    }
+
+    #[test]
+    fn terminal_targets_emit_distinct_brights() {
+        // Tokyo Night has canonical bright accents distinct from the
+        // normal ones — they must reach every terminal emitter.
+        let t = find_predefined("tokyo-night").unwrap();
+        assert_ne!(t.red, t.bright_red);
+        let kitty = kitty_conf(&t);
+        assert!(kitty.contains("color1  #f7768e"));
+        assert!(kitty.contains("color9  #ff899d"));
+        let ghostty = ghostty_conf(&t);
+        assert!(ghostty.contains("palette = 9=#ff899d"));
+        let vim = vim_colorscheme(&t);
+        assert!(vim.contains("let g:terminal_color_9  = \"#ff899d\""));
+        let noctalia = noctalia_scheme_variant(&t);
+        assert_eq!(noctalia["terminal"]["bright"]["red"], "#ff899d");
+        assert_eq!(noctalia["terminal"]["normal"]["red"], "#f7768e");
+    }
+
+    #[test]
+    fn brighten_raises_lightness_keeps_hue() {
+        let c = Lab::new(60.0, 20.0, -30.0);
+        let b = brighten(c);
+        assert!(b.l > c.l);
+        assert_eq!((b.a, b.b), (c.a, c.b));
+        // Already-bright accents saturate at the cap instead of clipping
+        // out of gamut.
+        assert_eq!(brighten(Lab::new(80.0, 0.0, 0.0)).l, 87.0);
     }
 
     #[test]
