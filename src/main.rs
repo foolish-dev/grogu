@@ -1532,7 +1532,12 @@ fn noctalia_wallpaper_cache_path() -> Result<PathBuf> {
 /// Walk Noctalia's wallpaper cache JSON looking for the first
 /// readable wallpaper path. Schema has shifted across Noctalia
 /// versions, so we scan recursively for any string that names an
-/// existing file. We prefer the `dark` key when an object has one.
+/// existing file. We prefer the `dark` key when an object has one,
+/// and the `wallpapers` subtree (the live per-monitor selection) over
+/// the whole document — the cache's top level also carries
+/// `defaultWallpaper` and the rotation history, and a naive walk hits
+/// `defaultWallpaper` first, theming from the stock wallpaper instead
+/// of the one on screen.
 fn pick_noctalia_wallpaper(v: &Value) -> Option<PathBuf> {
     fn walk(v: &Value) -> Option<PathBuf> {
         match v {
@@ -1552,6 +1557,9 @@ fn pick_noctalia_wallpaper(v: &Value) -> Option<PathBuf> {
             }
             _ => None,
         }
+    }
+    if let Some(w) = v.get("wallpapers").and_then(walk) {
+        return Some(w);
     }
     walk(v)
 }
@@ -1886,6 +1894,31 @@ mod tests {
         let colors = json!({ "mPrimary": "#71b3ca" });
         let out = patch_theme_conf(input, &colors);
         assert_eq!(out, "mPrimary=#71b3ca");
+    }
+
+    #[test]
+    fn pick_wallpaper_prefers_live_selection_over_default() {
+        // Mirror of Noctalia's real cache shape: `defaultWallpaper`
+        // sorts before `wallpapers`, so a naive document walk returns
+        // the stock wallpaper instead of the per-monitor selection.
+        let dir = std::env::temp_dir().join("grogu-test-wallpapers");
+        fs::create_dir_all(&dir).unwrap();
+        let default = dir.join("default.png");
+        let current = dir.join("current.jpg");
+        fs::write(&default, b"x").unwrap();
+        fs::write(&current, b"x").unwrap();
+        let cache = json!({
+            "defaultWallpaper": default.to_str().unwrap(),
+            "usedRandomWallpapers": { "all": [default.to_str().unwrap()] },
+            "wallpapers": { "eDP-1": {
+                "dark": current.to_str().unwrap(),
+                "light": current.to_str().unwrap(),
+            } },
+        });
+        assert_eq!(pick_noctalia_wallpaper(&cache), Some(current));
+        // Without a `wallpapers` subtree, fall back to the whole doc.
+        let cache = json!({ "defaultWallpaper": default.to_str().unwrap() });
+        assert_eq!(pick_noctalia_wallpaper(&cache), Some(default));
     }
 
     #[test]
