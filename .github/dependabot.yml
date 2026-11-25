@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Crate deps; Cargo.lock is committed, so these PRs bump it too. One grouped
+  # PR a week rather than one per crate.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  # The actions ci.yml pins by SHA.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
