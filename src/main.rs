@@ -4,9 +4,10 @@
 //! or `--from-teleia` (reads teleia's stored theme pref), grogu writes a
 //! consistent palette across these targets:
 //!
-//! - **Noctalia shell** — patches `colorSchemes.predefinedScheme` in
-//!   `~/.config/noctalia/settings.json` so its built-in scheme of the
-//!   same name activates. Other keys are preserved verbatim.
+//! - **Noctalia shell (v5)** — writes the theme as the custom palette
+//!   `~/.config/noctalia/palettes/Grogu.json`, which its config selects
+//!   with `[theme] source = "custom"` + `custom_palette = "Grogu"`,
+//!   then has the running shell reload it.
 //! - **niri** — writes `~/.config/niri/grogu.kdl`, an include-able KDL
 //!   snippet with focus-ring colours. niri live-reloads on save.
 //! - **teleia** — writes the `theme` pref straight into teleia's sqlite
@@ -41,16 +42,8 @@ use std::process::{Command, Stdio};
 #[derive(Clone)]
 struct Theme {
     slug: String,
-    /// Noctalia's bundled scheme name (always one of "Tokyo-Night" /
-    /// "Catppuccin" / "Dracula"). In extract mode we pick the bundled
-    /// scheme whose palette is nearest to the extracted one — Noctalia
-    /// enumerates `colorschemes/` once at startup with no rescan IPC,
-    /// so a freshly-written custom scheme is invisible until Noctalia
-    /// restarts. Picking from the loaded set means Meta+W repaints
-    /// Noctalia immediately, every time.
-    noctalia: String,
-    /// True if this palette was extracted from a wallpaper. teleia and
-    /// Noctalia both fall back to a nearest-bundled name in this mode.
+    /// True if this palette was extracted from a wallpaper. teleia falls
+    /// back to the nearest predefined theme's name in this mode.
     extracted: bool,
     bg: String,
     bg_hl: String,
@@ -84,7 +77,6 @@ fn predefined_themes() -> Vec<Theme> {
     vec![
         Theme {
             slug: "tokyo-night".into(),
-            noctalia: "Tokyo-Night".into(),
             extracted: false,
             bg: "#1a1b26".into(),
             bg_hl: "#283457".into(),
@@ -107,7 +99,6 @@ fn predefined_themes() -> Vec<Theme> {
         },
         Theme {
             slug: "catppuccin".into(),
-            noctalia: "Catppuccin".into(),
             extracted: false,
             bg: "#1e1e2e".into(),
             bg_hl: "#313244".into(),
@@ -131,7 +122,6 @@ fn predefined_themes() -> Vec<Theme> {
         },
         Theme {
             slug: "dracula".into(),
-            noctalia: "Dracula".into(),
             extracted: false,
             bg: "#282a36".into(),
             bg_hl: "#44475a".into(),
@@ -185,8 +175,8 @@ enum Cmd {
         theme: Option<String>,
         /// Extract the palette from a wallpaper image instead of using
         /// a predefined theme. Pass a path explicitly, or omit the value
-        /// to read Noctalia's current wallpaper from
-        /// `~/.cache/noctalia/wallpapers.json`. Honours $GROGU_WALLPAPER.
+        /// to ask the running Noctalia (`noctalia msg wallpaper-get`).
+        /// Honours $GROGU_WALLPAPER.
         #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "")]
         extract: Option<String>,
         /// Skip Noctalia.
@@ -218,12 +208,12 @@ enum Cmd {
         no_kbd: bool,
         /// After writing every target, also live-reload running apps:
         /// SIGUSR1 to kitty + teleia, and `tmux source-file` for any
-        /// running tmux server. Designed for the Noctalia
-        /// wallpaperChange hook so Meta+W repaints the whole desktop in
+        /// running tmux server. Designed for Noctalia's
+        /// wallpaper_changed hook so Meta+W repaints the whole desktop in
         /// one Rust call — no shell glue.
         #[arg(long)]
         reload: bool,
-        /// Use the light variant where supported (currently: Noctalia).
+        /// Switch Noctalia's theme mode, which apps follow, to light.
         #[arg(long)]
         light: bool,
         /// Print what would change without writing.
@@ -247,7 +237,7 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::List => {
             for t in predefined_themes() {
-                println!("{:<14} -> noctalia:{}", t.slug, t.noctalia);
+                println!("{}", t.slug);
             }
         }
         Cmd::Extract { path } => {
@@ -258,10 +248,7 @@ fn main() -> Result<()> {
         }
         Cmd::Paths => {
             println!("teleia sqlite     : {}", teleia_db_path()?.display());
-            println!(
-                "noctalia settings : {}",
-                noctalia_settings_path()?.display()
-            );
+            println!("noctalia palette  : {}", noctalia_palette_path()?.display());
             println!("niri snippet      : {}", niri_snippet_path()?.display());
             for p in vim_colorscheme_paths()? {
                 println!("vim colorscheme   : {}", p.display());
@@ -412,16 +399,6 @@ fn xdg_data() -> Result<PathBuf> {
 
 fn teleia_db_path() -> Result<PathBuf> {
     Ok(xdg_data()?.join("teleia/teleia.sqlite"))
-}
-
-fn noctalia_settings_path() -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("NOCTALIA_SETTINGS_FILE") {
-        return Ok(PathBuf::from(p));
-    }
-    if let Some(p) = std::env::var_os("NOCTALIA_CONFIG_DIR") {
-        return Ok(PathBuf::from(p).join("settings.json"));
-    }
-    Ok(xdg_config()?.join("noctalia/settings.json"))
 }
 
 fn noctalia_config_dir() -> Result<PathBuf> {
@@ -607,134 +584,52 @@ fn sq_dist(a: [i32; 3], b: [i32; 3]) -> i64 {
     dr * dr + dg * dg + db * db
 }
 
-// -------- noctalia: JSON-patch settings.json --------
+// -------- noctalia v5: the Grogu palette --------
 
+/// Where Noctalia v5 reads the palette its config selects: `[theme] source =
+/// "custom"` with `custom_palette = "Grogu"` loads `<config>/palettes/Grogu.json`.
+fn noctalia_palette_path() -> Result<PathBuf> {
+    Ok(noctalia_config_dir()?.join("palettes/Grogu.json"))
+}
+
+/// Every theme, extracted or predefined, reaches Noctalia as that one custom
+/// palette, so the shell wears the colours grogu gives the terminals and
+/// editors. Selecting a v5 built-in palette instead would take a GUI-state
+/// override, which would then outrank the user's own config.
 fn apply_noctalia(theme: &Theme, dark: bool, dry_run: bool) -> Result<String> {
-    if theme.extracted {
-        apply_noctalia_grogu_scheme(theme, dark, dry_run)
-    } else {
-        apply_noctalia_predefined(theme, dark, dry_run)
-    }
-}
-
-fn apply_noctalia_predefined(theme: &Theme, dark: bool, dry_run: bool) -> Result<String> {
-    let settings_path = noctalia_settings_path()?;
-    patch_noctalia_settings(&settings_path, &theme.noctalia, dark, dry_run)?;
+    let path = noctalia_palette_path()?;
+    let mode = if dark { "dark" } else { "light" };
     if dry_run {
         return Ok(format!(
-            "noctalia: would set predefinedScheme={} darkMode={} at {}",
-            theme.noctalia,
-            dark,
-            settings_path.display()
+            "noctalia: would write the Grogu palette to {} (mode {mode})",
+            path.display()
         ));
     }
-    // ColorSchemeService only re-runs applyScheme on darkMode changes or
-    // explicit IPC — a settings.json write that only changes
-    // predefinedScheme leaves colors.json stale until the next restart.
-    // Nudge via IPC if noctalia is up; the file write is the fallback.
-    let ipc_status = nudge_noctalia(&theme.noctalia, dark);
+    write_noctalia_palette(&path, theme)?;
     Ok(format!(
-        "noctalia: set predefinedScheme={} darkMode={} in {}{}",
-        theme.noctalia,
-        dark,
-        settings_path.display(),
-        ipc_status,
+        "noctalia: wrote the Grogu palette to {}{}",
+        path.display(),
+        nudge_noctalia(mode)
     ))
 }
 
-// Extracted-palette path. noctalia's schemes[] is cached at startup with
-// no rescan IPC, so a fresh user scheme is invisible until restart. To
-// repaint Noctalia *now* with the wallpaper-extracted palette, grogu
-// writes ~/.config/noctalia/colors.json directly — Color.qml watches
-// that file and live-reloads every m-color binding on change. The
-// Grogu.json scheme file is also written so that on the next noctalia
-// restart, predefinedScheme="Grogu" resolves to a real scheme.
-fn apply_noctalia_grogu_scheme(theme: &Theme, dark: bool, dry_run: bool) -> Result<String> {
-    let cfg = noctalia_config_dir()?;
-    let settings_path = cfg.join("settings.json");
-    let colors_path = cfg.join("colors.json");
-    let scheme_path = cfg.join("colorschemes/Grogu/Grogu.json");
-
-    if dry_run {
-        return Ok(format!(
-            "noctalia: would write Grogu scheme to {}, live-paint via {}, set predefinedScheme=Grogu darkMode={} in {}",
-            scheme_path.display(),
-            colors_path.display(),
-            dark,
-            settings_path.display(),
-        ));
-    }
-
-    let scheme_obj = noctalia_m_colors(theme);
-    let scheme_full = serde_json::json!({
-        "dark": noctalia_scheme_variant(theme),
-        "light": noctalia_scheme_variant(theme),
-    });
-
-    if let Some(parent) = scheme_path.parent() {
+fn write_noctalia_palette(path: &Path, theme: &Theme) -> Result<()> {
+    if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
-    let scheme_pretty = serde_json::to_string_pretty(&scheme_full)? + "\n";
-    atomic_write(&scheme_path, scheme_pretty.as_bytes())
-        .with_context(|| format!("write {}", scheme_path.display()))?;
-
-    let colors_pretty = serde_json::to_string_pretty(&scheme_obj)? + "\n";
-    atomic_write(&colors_path, colors_pretty.as_bytes())
-        .with_context(|| format!("write {}", colors_path.display()))?;
-
-    patch_noctalia_settings(&settings_path, "Grogu", dark, false)?;
-
-    Ok(format!(
-        "noctalia: wrote Grogu scheme to {}, live-painted {}, set predefinedScheme=Grogu darkMode={} in {}",
-        scheme_path.display(),
-        colors_path.display(),
-        dark,
-        settings_path.display(),
-    ))
+    let pretty = serde_json::to_string_pretty(&noctalia_palette(theme))? + "\n";
+    // The running shell may be reading it this instant: never a half file.
+    atomic_write(path, pretty.as_bytes()).with_context(|| format!("write {}", path.display()))
 }
 
-fn patch_noctalia_settings(
-    settings_path: &std::path::Path,
-    scheme: &str,
-    dark: bool,
-    dry_run: bool,
-) -> Result<()> {
-    let mut doc: Value = if settings_path.exists() {
-        let raw = fs::read_to_string(settings_path)
-            .with_context(|| format!("read {}", settings_path.display()))?;
-        serde_json::from_str(&raw)
-            .with_context(|| format!("parse {} as JSON", settings_path.display()))?
-    } else {
-        Value::Object(serde_json::Map::new())
-    };
-    let root = doc
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("noctalia settings.json is not a JSON object"))?;
-    let cs = root
-        .entry("colorSchemes")
-        .or_insert_with(|| Value::Object(serde_json::Map::new()))
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("colorSchemes is not a JSON object"))?;
-    cs.insert("useWallpaperColors".into(), Value::Bool(false));
-    cs.insert("predefinedScheme".into(), Value::String(scheme.into()));
-    cs.insert("darkMode".into(), Value::Bool(dark));
-
-    if dry_run {
-        return Ok(());
-    }
-    if let Some(parent) = settings_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-    }
-    let pretty = serde_json::to_string_pretty(&doc)? + "\n";
-    // settings.json holds user-owned Noctalia config (bar, dock, custom
-    // keys). Write atomically to avoid corrupting unrelated state if
-    // grogu is interrupted mid-write.
-    atomic_write(settings_path, pretty.as_bytes())
-        .with_context(|| format!("write {}", settings_path.display()))?;
-    Ok(())
+/// The palette file: one variant per mode. grogu has one set of colours, so
+/// both modes get it.
+fn noctalia_palette(t: &Theme) -> Value {
+    serde_json::json!({ "dark": noctalia_scheme_variant(t), "light": noctalia_scheme_variant(t) })
 }
 
-// Flat m-color map (what Color.qml's customColorsFile reads).
+// Flat m-colour map: each palette mode's colours, and the keys the SDDM
+// greeter's theme.conf takes.
 fn noctalia_m_colors(t: &Theme) -> Value {
     serde_json::json!({
         "mPrimary": t.blue,
@@ -756,8 +651,8 @@ fn noctalia_m_colors(t: &Theme) -> Value {
     })
 }
 
-// Full scheme variant (m-colors + terminal sub-object), matching the
-// shape of Noctalia's bundled scheme JSON (e.g. Tokyo-Night.json).
+// One palette mode (m-colours + terminal sub-object), in the shape of
+// Noctalia's own palette JSON.
 fn noctalia_scheme_variant(t: &Theme) -> Value {
     let mut v = noctalia_m_colors(t);
     v.as_object_mut().unwrap().insert(
@@ -794,22 +689,32 @@ fn noctalia_scheme_variant(t: &Theme) -> Value {
     v
 }
 
-fn nudge_noctalia(scheme: &str, dark: bool) -> String {
-    let dark_cmd = if dark { "setDark" } else { "setLight" };
-    let dark_ok = run_qs_ipc(&["darkMode", dark_cmd]);
-    let scheme_ok = run_qs_ipc(&["colorScheme", "set", scheme]);
-    match (dark_ok, scheme_ok) {
-        (true, true) => " (nudged via IPC)".into(),
-        (false, false) => " (IPC nudge skipped — noctalia not running?)".into(),
-        _ => " (partial IPC nudge)".into(),
+/// Have a running Noctalia take the palette: `config-reload` re-resolves the
+/// theme from disk. The mode is set only when it differs, because
+/// `theme-mode-set` persists into Noctalia's GUI state. No running shell is
+/// not an error: it reads the palette when it starts.
+fn nudge_noctalia(mode: &str) -> String {
+    let current = match Command::new("noctalia")
+        .args(["msg", "theme-mode-get"])
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => return " (Noctalia is not running; it loads the palette when it starts)".into(),
+    };
+    let mode_ok = current == mode || noctalia_msg(&["theme-mode-set", mode]);
+    let reload_ok = noctalia_msg(&["config-reload"]);
+    match (mode_ok, reload_ok) {
+        (true, true) => " (Noctalia reloaded)".into(),
+        (false, true) => format!(" (Noctalia reloaded, but kept mode {current} over {mode})"),
+        (_, false) => " (Noctalia did not reload; it loads the palette at its next start)".into(),
     }
 }
 
-fn run_qs_ipc(call_args: &[&str]) -> bool {
-    let mut args: Vec<&str> = vec!["-c", "noctalia-shell", "ipc", "call"];
-    args.extend_from_slice(call_args);
-    Command::new("qs")
-        .args(&args)
+fn noctalia_msg(args: &[&str]) -> bool {
+    Command::new("noctalia")
+        .arg("msg")
+        .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -1484,7 +1389,7 @@ use std::path::Path;
 /// Decide which wallpaper to extract from. Precedence:
 /// 1. Explicit `--extract PATH` argument
 /// 2. `$GROGU_WALLPAPER` env var (intended for Noctalia hook invocation)
-/// 3. Noctalia's wallpaper cache file
+/// 3. The running Noctalia (`noctalia msg wallpaper-get`)
 fn resolve_wallpaper(explicit: Option<&str>) -> Result<PathBuf> {
     if let Some(p) = explicit {
         let pb = PathBuf::from(p);
@@ -1499,69 +1404,26 @@ fn resolve_wallpaper(explicit: Option<&str>) -> Result<PathBuf> {
             return Ok(pb);
         }
     }
-    let cache = noctalia_wallpaper_cache_path()?;
-    if !cache.exists() {
-        return Err(anyhow!(
-            "no wallpaper specified and Noctalia cache not found at {}.\n\
-             pass a path: `grogu apply --extract /path/to/wallpaper.jpg`",
-            cache.display()
-        ));
+    let out = Command::new("noctalia")
+        .args(["msg", "wallpaper-get"])
+        .stderr(Stdio::null())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => wallpaper_from_msg(&String::from_utf8_lossy(&o.stdout))
+            .ok_or_else(|| {
+                anyhow!("Noctalia names no wallpaper file — set $GROGU_WALLPAPER or pass --extract PATH")
+            }),
+        _ => Err(anyhow!(
+            "no wallpaper given, and no running Noctalia to ask.\n\
+             pass a path: `grogu apply --extract /path/to/wallpaper.jpg`"
+        )),
     }
-    let raw = fs::read_to_string(&cache).with_context(|| format!("read {}", cache.display()))?;
-    let json: Value =
-        serde_json::from_str(&raw).with_context(|| format!("parse {} as JSON", cache.display()))?;
-    pick_noctalia_wallpaper(&json).ok_or_else(|| {
-        anyhow!(
-            "couldn't find an active wallpaper path in {} — set $GROGU_WALLPAPER or pass --extract PATH",
-            cache.display()
-        )
-    })
 }
 
-fn noctalia_wallpaper_cache_path() -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("NOCTALIA_CACHE_DIR") {
-        return Ok(PathBuf::from(p).join("wallpapers.json"));
-    }
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .ok_or_else(|| anyhow!("neither XDG_CACHE_HOME nor HOME is set"))?;
-    Ok(base.join("noctalia/wallpapers.json"))
-}
-
-/// Walk Noctalia's wallpaper cache JSON looking for the first
-/// readable wallpaper path. Schema has shifted across Noctalia
-/// versions, so we scan recursively for any string that names an
-/// existing file. We prefer the `dark` key when an object has one,
-/// and the `wallpapers` subtree (the live per-monitor selection) over
-/// the whole document — the cache's top level also carries
-/// `defaultWallpaper` and the rotation history, and a naive walk hits
-/// `defaultWallpaper` first, theming from the stock wallpaper instead
-/// of the one on screen.
-fn pick_noctalia_wallpaper(v: &Value) -> Option<PathBuf> {
-    fn walk(v: &Value) -> Option<PathBuf> {
-        match v {
-            Value::String(s) => {
-                let pb = PathBuf::from(s);
-                if pb.is_file() {
-                    return Some(pb);
-                }
-                None
-            }
-            Value::Array(arr) => arr.iter().find_map(walk),
-            Value::Object(obj) => {
-                if let Some(d) = obj.get("dark").and_then(walk) {
-                    return Some(d);
-                }
-                obj.values().find_map(walk)
-            }
-            _ => None,
-        }
-    }
-    if let Some(w) = v.get("wallpapers").and_then(walk) {
-        return Some(w);
-    }
-    walk(v)
+/// `noctalia msg wallpaper-get` prints the wallpaper's path on one line.
+fn wallpaper_from_msg(out: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(out.trim());
+    p.is_file().then_some(p)
 }
 
 const EXTRACT_K: usize = 12;
@@ -1640,9 +1502,8 @@ fn extract_palette(path: &Path) -> Result<Theme> {
 
     let black_lab = Lab::new(bg_lab.l * 0.5, bg_lab.a, bg_lab.b);
 
-    let mut t = Theme {
+    let t = Theme {
         slug: "grogu-extracted".into(),
-        noctalia: String::new(),
         extracted: true,
         bg: lab_to_hex(bg_lab),
         bg_hl: lab_to_hex(bg_hl_lab),
@@ -1663,21 +1524,7 @@ fn extract_palette(path: &Path) -> Result<Theme> {
         bright_purple: lab_to_hex(brighten(purple)),
         bright_cyan: lab_to_hex(brighten(cyan)),
     };
-    // Resolve the bundled Noctalia scheme name from the nearest
-    // predefined match. Noctalia can't see user-added schemes without
-    // a restart, so we must point predefinedScheme at one Noctalia
-    // already has loaded.
-    t.noctalia = nearest_predefined_noctalia(&t);
     Ok(t)
-}
-
-fn nearest_predefined_noctalia(theme: &Theme) -> String {
-    let slug = nearest_predefined(theme);
-    predefined_themes()
-        .into_iter()
-        .find(|t| t.slug == slug)
-        .map(|t| t.noctalia)
-        .unwrap_or_else(|| "Tokyo-Night".into())
 }
 
 fn clamp_lightness(c: Lab, min_l: f32, max_l: f32) -> Lab {
@@ -1752,7 +1599,7 @@ fn lab_to_hex(c: Lab) -> String {
 
 fn print_theme(t: &Theme) {
     println!("slug:     {}", t.slug);
-    println!("noctalia: {} (extracted: {})", t.noctalia, t.extracted);
+    println!("extracted: {}", t.extracted);
     println!("bg        {}", t.bg);
     println!("bg_hl     {}", t.bg_hl);
     println!("fg        {}", t.fg);
@@ -1897,28 +1744,52 @@ mod tests {
     }
 
     #[test]
-    fn pick_wallpaper_prefers_live_selection_over_default() {
-        // Mirror of Noctalia's real cache shape: `defaultWallpaper`
-        // sorts before `wallpapers`, so a naive document walk returns
-        // the stock wallpaper instead of the per-monitor selection.
-        let dir = std::env::temp_dir().join("grogu-test-wallpapers");
+    fn noctalia_palette_gives_both_modes_the_theme_in_v5_shape() {
+        let t = find_predefined("tokyo-night").unwrap();
+        let p = noctalia_palette(&t);
+        assert_eq!(p["dark"], p["light"]);
+        assert_eq!(p["dark"]["mPrimary"], json!(t.blue));
+        assert_eq!(p["dark"]["mSurface"], json!(t.bg));
+        assert_eq!(p["dark"]["terminal"]["normal"]["black"], json!(t.black));
+        assert_eq!(p["dark"]["terminal"]["bright"]["white"], json!(t.light_fg));
+    }
+
+    #[test]
+    fn the_palette_goes_where_v5_reads_it() {
+        // The only test that touches NOCTALIA_CONFIG_DIR.
+        std::env::set_var("NOCTALIA_CONFIG_DIR", "/cfg/noctalia");
+        let got = noctalia_palette_path().unwrap();
+        std::env::remove_var("NOCTALIA_CONFIG_DIR");
+        assert_eq!(got, PathBuf::from("/cfg/noctalia/palettes/Grogu.json"));
+    }
+
+    #[test]
+    fn writing_the_palette_creates_the_palettes_dir() {
+        let dir = std::env::temp_dir().join(format!("grogu-test-palette-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("palettes/Grogu.json");
+        write_noctalia_palette(&path, &find_predefined("dracula").unwrap()).unwrap();
+        let back: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(back["dark"].is_object() && back["light"].is_object());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn wallpaper_from_msg_trims_the_line_and_needs_a_real_file() {
+        let dir = std::env::temp_dir().join(format!("grogu-test-wp-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let default = dir.join("default.png");
-        let current = dir.join("current.jpg");
-        fs::write(&default, b"x").unwrap();
-        fs::write(&current, b"x").unwrap();
-        let cache = json!({
-            "defaultWallpaper": default.to_str().unwrap(),
-            "usedRandomWallpapers": { "all": [default.to_str().unwrap()] },
-            "wallpapers": { "eDP-1": {
-                "dark": current.to_str().unwrap(),
-                "light": current.to_str().unwrap(),
-            } },
-        });
-        assert_eq!(pick_noctalia_wallpaper(&cache), Some(current));
-        // Without a `wallpapers` subtree, fall back to the whole doc.
-        let cache = json!({ "defaultWallpaper": default.to_str().unwrap() });
-        assert_eq!(pick_noctalia_wallpaper(&cache), Some(default));
+        let wp = dir.join("current.jpg");
+        fs::write(&wp, b"x").unwrap();
+        assert_eq!(
+            wallpaper_from_msg(&format!("{}\n", wp.display())),
+            Some(wp.clone())
+        );
+        assert_eq!(
+            wallpaper_from_msg(&format!("{}\n", dir.join("gone.png").display())),
+            None
+        );
+        assert_eq!(wallpaper_from_msg(""), None);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

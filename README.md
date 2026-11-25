@@ -5,7 +5,7 @@ desktop in one shot:
 
 | target | what it writes |
 | --- | --- |
-| **[Noctalia shell](https://github.com/noctalia-dev/noctalia-shell)** | patches `colorSchemes.predefinedScheme` + `darkMode` in `~/.config/noctalia/settings.json`. The matching built-in scheme activates immediately. |
+| **[Noctalia shell](https://github.com/noctalia-dev/noctalia)** (v5) | writes the theme as the custom palette `~/.config/noctalia/palettes/Grogu.json` and has the running shell reload it. Select it once in Noctalia's config: `[theme]` `source = "custom"`, `custom_palette = "Grogu"`. |
 | **[niri](https://github.com/YaLTeR/niri)** | writes `~/.config/niri/grogu.kdl`, an include-able snippet with focus-ring colours. niri live-reloads. |
 | **[teleia](https://github.com/foolish-dev/teleia)** | sets the `theme` row in teleia's sqlite prefs store (plus the exact extracted palette as `grogu_palette` in extract mode). teleia picks it up on next launch, or on SIGUSR1 with `--reload`. |
 | **vim / neovim** | drops `~/.vim/colors/grogu.vim` and/or `~/.config/nvim/colors/grogu.vim`. Activate with `:colorscheme grogu`. |
@@ -31,7 +31,7 @@ grogu apply --no-kitty --no-ghostty  # skip the terminals
 grogu apply --reload             # also live-reload kitty, teleia and tmux
 
 # v2: derive the whole palette from the current wallpaper
-grogu apply --extract                              # reads Noctalia's wallpaper cache
+grogu apply --extract                              # asks the running Noctalia for its wallpaper
 grogu apply --extract /path/to/wallpaper.jpg       # explicit path
 grogu extract /path/to/wallpaper.jpg               # preview without writing
 ```
@@ -59,18 +59,8 @@ wallpaper itself instead of reading a predefined theme. The pipeline:
 
 The extracted palette lands in every target:
 
-- **Noctalia** — writes a full Material-Design + ANSI scheme JSON to
-  `~/.config/noctalia/colorschemes/Grogu/Grogu.json` (the `find
-  -mindepth 2` Noctalia uses to enumerate schemes requires that extra
-  directory), sets `colorSchemes.predefinedScheme = "Grogu"`, and
-  *also* writes the flat m-color map directly to
-  `~/.config/noctalia/colors.json`. The direct write is what makes the
-  bar repaint *now* — Noctalia's `schemes[]` is cached once at startup
-  with no rescan IPC, so a fresh user scheme is invisible until the
-  next restart, but its `Color.qml` watches `colors.json` and
-  live-reloads every binding on change. On the next Noctalia restart,
-  `predefinedScheme = "Grogu"` resolves to the scheme file written
-  above and the palette persists.
+- **Noctalia** — the same `palettes/Grogu.json` as predefined mode,
+  filled with the extracted colours.
 - **niri**, **kitty**, **ghostty**, **vim/neovim** — same renderers
   as predefined mode, just parameterised over the extracted palette.
 - **teleia** — grogu writes the *nearest* predefined theme name
@@ -83,9 +73,7 @@ Wallpaper source resolution order:
 
 1. Explicit path: `grogu apply --extract /path/to/img.jpg`
 2. `$GROGU_WALLPAPER` env var (intended for hook invocations)
-3. Noctalia's wallpaper cache at `~/.cache/noctalia/wallpapers.json`
-   — grogu walks the JSON looking for the first string that names an
-   existing file, preferring `dark` keys.
+3. The running Noctalia, asked with `noctalia msg wallpaper-get`.
 
 Preview without writing:
 
@@ -98,19 +86,17 @@ prints the extracted palette so you can sanity-check what `apply
 
 ## Hook it to Noctalia's wallpaper rotation
 
-Noctalia has a hooks system in its settings panel (Settings → Hooks).
-Add a hook that runs after a wallpaper change:
+Noctalia v5 runs hooks from its config. Add one that runs after a wallpaper
+change; Noctalia hands it the new wallpaper in `$NOCTALIA_WALLPAPER_PATH`:
 
-```
-event: wallpaper.changed
-command: grogu apply --extract --reload
+```toml
+# ~/.config/noctalia/config.toml
+[hooks]
+wallpaper_changed = 'grogu apply --extract="$NOCTALIA_WALLPAPER_PATH" --reload'
 ```
 
 (Drop `--extract` if you'd rather lock to a predefined theme;
 `--reload` makes running kitty/teleia/tmux repaint immediately.)
-If Noctalia's hook system can pass the new wallpaper path as an
-argument, set the command to `grogu apply --extract %{wallpaper}` —
-otherwise grogu reads the path back out of Noctalia's wallpaper cache.
 
 Now every wallpaper rotation re-paints the rest of the desktop. niri
 picks up the new colours automatically (live reload), teleia uses the
@@ -144,28 +130,22 @@ include "grogu.kdl"
 
 Subsequent `grogu apply` runs rewrite `grogu.kdl` only; niri live-reloads.
 
-## How the Noctalia patch works
+## How the Noctalia palette works
 
-grogu reads the existing `settings.json` as JSON, mutates only
-`colorSchemes.useWallpaperColors` / `colorSchemes.predefinedScheme` /
-`colorSchemes.darkMode`, and writes the rest back verbatim. Other
-top-level keys (`bar`, `dock`, custom keys you added) are preserved.
+Noctalia v5 loads custom palettes from `palettes/<name>.json` in its config
+directory, so grogu writes every theme — predefined or extracted — to
+`palettes/Grogu.json`: Material-style `m*` colours plus a `terminal`
+block, the same for both modes. The write is atomic, so the shell never
+reads a half file.
 
-Predefined mode (`--theme tokyo-night|catppuccin|dracula`): the
-settings.json write alone doesn't repaint a running Noctalia —
-`ColorSchemeService` only re-runs `applyScheme` on darkMode changes or
-explicit IPC. After writing, grogu calls
-`qs -c noctalia-shell ipc call colorScheme set <Name>` and
-`darkMode setDark|setLight` to make the live shell repaint. If `qs`
-isn't on PATH or noctalia isn't running, IPC silently no-ops and the
-file write persists for the next launch.
+Then, if Noctalia is running, grogu runs `noctalia msg config-reload`, which
+re-resolves the theme from disk, and sets the theme mode (`--light`, or dark)
+with `noctalia msg theme-mode-set` only when it differs, since that persists
+into Noctalia's GUI state. Without a running shell the palette simply waits
+on disk for its next start.
 
-Extracted mode (`--extract`): instead of nudging IPC (which would
-error since `Grogu` isn't in the cached `schemes[]` until restart),
-grogu writes `colors.json` directly. Noctalia's `Color.qml`
-file-watches `colors.json` and live-reloads every m-color binding —
-so the bar repaints with the wallpaper-derived palette immediately,
-no restart needed.
+grogu never selects one of Noctalia's built-in palettes: in v5 that would
+take a GUI-state override, which then outranks your own config file.
 
 ## How the teleia integration works
 
@@ -191,9 +171,8 @@ If teleia hasn't run on the machine, grogu skips this target with a note.
 
 ## Env overrides
 
-- `NOCTALIA_CONFIG_DIR` / `NOCTALIA_SETTINGS_FILE` — point at a non-default Noctalia install
-- `NOCTALIA_CACHE_DIR` — where to find `wallpapers.json` in extract mode
-- `GROGU_WALLPAPER` — wallpaper to extract from (beats the Noctalia cache, loses to an explicit `--extract PATH`)
+- `NOCTALIA_CONFIG_DIR` — Noctalia's config directory, where `palettes/Grogu.json` goes (default `~/.config/noctalia`)
+- `GROGU_WALLPAPER` — wallpaper to extract from (beats asking Noctalia, loses to an explicit `--extract PATH`)
 - `GROGU_SDDM_GREETER_BG` / `GROGU_SDDM_GREETER_CONF` — the SDDM greeter files to sync
 - `XDG_CONFIG_HOME` / `XDG_DATA_HOME` — standard XDG overrides for niri / teleia paths
 
